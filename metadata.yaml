@@ -1,9 +1,9 @@
 name: astrbot_plugin_tataru
 display_name: 塔塔露
 desc: FF14 塔塔露 AstrBot 插件，当前已迁移帮助、暖暖、选门、仙人彩、日历、抽卡。
-version: v0.2.0
+version: v0.2.1
 author: aaron-li / Codex
-repo: ""
+repo: https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 support_platforms:
   - aiocqhttp
   - qq_official

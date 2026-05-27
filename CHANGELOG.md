@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.2.1
+
+### 修复
+
+- 补充插件仓库地址，修复 AstrBot WebUI 更新插件时报 `does not specify a repository URL or download URL` 的问题。
+
 ## v0.2.0
 
 ### 新增

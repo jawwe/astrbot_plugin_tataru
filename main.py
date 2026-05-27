@@ -209,7 +209,13 @@ async def get_bili_detail(bili_url: str) -> str:
     raise ValueError("解析bilibili视频简介失败")
 
 
-@register("astrbot_plugin_tataru", "aaron-li / Codex", "FF14 塔塔露 AstrBot 插件", "0.2.0")
+@register(
+    "astrbot_plugin_tataru",
+    "aaron-li / Codex",
+    "FF14 塔塔露 AstrBot 插件",
+    "0.2.1",
+    "https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru",
+)
 class TataruPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
