@@ -51,6 +51,8 @@ CALENDAR_SOURCES = {
 }
 QQ_DOC_URL = "https://docs.qq.com/sheet/DY2lCeEpwemZESm5q?tab=dewveu&c=A1A0A0"
 BILI_USER_ID = 15503317
+WEIBO_URL = "https://m.weibo.cn/api/container/getIndex?type=uid&value=1797798792&containerid=1076031797798792"
+WEIBO_REFERER = "https://m.weibo.cn/u/1797798792"
 DUNGEON_NOTE_URL = "https://ff14.org/duty"
 GARLAND_BASE_URL = "https://garlandtools.cn"
 PARTY_FINDER_URL = "https://xivpf.littlenightmare.top/listings"
@@ -457,13 +459,14 @@ def create_help_text() -> str:
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
+[看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
 [价格 (大区/服务器) 物品名 (HQ) (数量)] 查询市场物价
 [房子 服务器名 主城名 房子大小] 查询空房
 [抽卡] 随机抽取一张FF14塔罗牌
 
 以下功能仍在迁移中：
-[看看微博] [输出]
+[输出]
 """
 
 
@@ -577,6 +580,59 @@ def truncate_text(text: str, length: int = 80) -> str:
     if len(text) <= length:
         return text
     return text[:length - 1] + "…"
+
+
+def clean_weibo_title(text: str) -> str:
+    title = strip_html(text)
+    title = re.sub(r"#(?:最终幻想14|FF14)#", "", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    return truncate_text(title or "微博内容为空", 90)
+
+
+def is_pinned_weibo_card(card: dict, mblog: dict) -> bool:
+    if mblog.get("isTop") or mblog.get("is_top"):
+        return True
+    title = str(card.get("title", "") or card.get("desc", ""))
+    return "置顶" in title
+
+
+async def get_ff_weibo_text(cookie: str | None = None, limit: int = 5) -> str:
+    headers = {
+        "Referer": WEIBO_REFERER,
+        "MWeibo-Pwa": "1",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+
+    payload = await aiohttp_get(WEIBO_URL, headers=headers)
+    cards = payload.get("data", {}).get("cards") if isinstance(payload, dict) else None
+    if not isinstance(cards, list):
+        return "微博获取失败，可能需要在插件配置中填写微博 Cookie 后重试。"
+
+    result = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        mblog = card.get("mblog")
+        if not isinstance(mblog, dict):
+            continue
+        if is_pinned_weibo_card(card, mblog):
+            continue
+
+        bid = mblog.get("bid")
+        if not bid:
+            continue
+        title = clean_weibo_title(str(mblog.get("text") or ""))
+        created_at = str(mblog.get("created_at") or "未知时间")
+        weibo_url = "https://m.weibo.cn/status/" + str(bid)
+        result.append(f"【{len(result) + 1}】{title} {created_at}\n{weibo_url}")
+        if len(result) >= limit:
+            break
+
+    if not result:
+        return "没有获取到最新微博，可能是微博接口结构变化或需要配置微博 Cookie。"
+    return "\n".join(result)
 
 
 def find_bili_url_in_text(text: str) -> str | None:
@@ -1772,7 +1828,7 @@ async def get_party_finder_texts(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "0.11.2",
+    "0.12.0",
     "https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru",
 )
 class TataruPlugin(Star):
@@ -1792,6 +1848,9 @@ class TataruPlugin(Star):
 
     def default_calendar_server(self) -> str:
         return "国际服" if bool(self.config.get("use_global_calendar", False)) else "国服"
+
+    def weibo_cookie(self) -> str:
+        return str(self.config.get("weibo_cookie", "") or "").strip()
 
     @filter.command("帮帮忙")
     async def help(self, event: AstrMessageEvent):
@@ -1889,6 +1948,11 @@ class TataruPlugin(Star):
             image_components.append(Comp.Image.fromFileSystem(str(image_path)))
 
         yield event.chain_result(image_components)
+
+    @filter.command("看看微博")
+    async def ff_weibo(self, event: AstrMessageEvent):
+        """获取FF官方微博新闻。"""
+        yield event.plain_result(await get_ff_weibo_text(self.weibo_cookie()))
 
     @filter.command("物品")
     async def item(self, event: AstrMessageEvent):

@@ -23,6 +23,7 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 | `日历` | 查询国服/国际服活动日历 | 文本 |
 | `攻略` | 查询副本攻略 | 默认图片，带 `文本` 参数时返回文本 |
 | `招募` | 查询 FF14 国服招募板 | 图片 |
+| `看看微博` | 查询 FF14 官方微博最新消息 | 文本 |
 | `物品` | 查询物品基础信息和获取方式 | 图标 + 图片 |
 | `价格` | 查询市场板物价 | 图片 |
 | `房子` / `房屋` | 查询指定服务器空房 | 图片，参数错误时返回文本 |
@@ -126,6 +127,20 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 
 数据源优先级：remote-party-finder v2 API + XIVAPI v2 解析世界名/副本名，失败时回退 v1 API，再失败时回退网页解析。
 
+### 看看微博
+
+```text
+看看微博
+```
+
+返回 FF14 官方微博最新 5 条非置顶微博，内容包含微博标题、发布时间和移动端链接。命令会跳过广告、推荐、无 `mblog` 的卡片和置顶微博。
+
+配置项：
+
+- `微博 Cookie`：可选。微博移动端接口可能对匿名请求返回 432 或限流，填写 Cookie 后会随请求发送，提高获取稳定性。
+
+数据源：微博移动端接口，账号为《最终幻想14》官方微博。
+
 ### 物品
 
 ```text
@@ -201,10 +216,10 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `默认使用国际服日历` | `false` | 控制 `日历` 命令无参数时默认查询国服还是国际服。 |
+| `微博 Cookie` | 空 | 可选。供 `看看微博` 请求微博移动端接口时使用，提高稳定性。 |
 
 ## 后续待迁移
 
-- `看看微博`
 - `输出`
 
 ## 使用的项目和服务
@@ -222,5 +237,6 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 - [iCloud Calendar](https://www.icloud.com/calendar/)：活动日历备用数据源。
 - [腾讯文档](https://docs.qq.com/)：暖暖功能兜底链接。
 - [Bilibili](https://www.bilibili.com/)：暖暖视频来源之一。
+- [微博](https://weibo.com/1797798792)：`看看微博` 的 FF14 官方微博数据源。
 - [Pillow](https://python-pillow.org/)：文本转图片渲染。
 - [icalendar](https://icalendar.readthedocs.io/)：ICS 日历解析。

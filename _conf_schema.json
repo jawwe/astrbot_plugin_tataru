@@ -4,5 +4,11 @@
     "type": "bool",
     "default": false,
     "hint": "关闭时默认查询国服日历；开启后默认查询国际服日历。也可以用“日历 国服”或“日历 国际服”临时指定。"
+  },
+  "weibo_cookie": {
+    "description": "微博 Cookie",
+    "type": "string",
+    "default": "",
+    "hint": "可选。用于“看看微博”命令请求微博移动端接口；不填写也会尝试公开访问，但微博可能返回 432 或限流。"
   }
 }
