@@ -697,6 +697,24 @@ async def enrich_party_finder_v2_listings(listings: list[dict]) -> list[dict]:
     return enriched
 
 
+def party_finder_matches_search(listing: dict, search_text: str | None) -> bool:
+    if not search_text:
+        return True
+    search_area = " ".join(
+        party_optional_text(listing.get(key))
+        for key in (
+            "duty",
+            "description",
+            "name",
+            "player_name",
+            "created_world",
+            "home_world",
+            "datacenter",
+        )
+    ).lower()
+    return search_text.lower() in search_area
+
+
 def extract_party_finder_listings(payload) -> list[dict] | None:
     if not isinstance(payload, dict):
         return None
@@ -744,9 +762,10 @@ async def get_party_finder_texts_api_v2(
     search_text: str | None = None,
     limit: int = 10,
 ) -> list[str] | None:
+    fetch_limit = 100 if search_text else max(1, min(limit, 100))
     params = {
         "page": 1,
-        "per_page": max(1, min(limit, 100)),
+        "per_page": fetch_limit,
         "datacenter": data_centre,
     }
     if category:
@@ -754,19 +773,21 @@ async def get_party_finder_texts_api_v2(
         if category_id is None:
             return None
         params["category_id"] = category_id
-    if search_text:
-        params["search"] = search_text
-
     payload = await aiohttp_get(f"{PARTY_FINDER_API_V2_URL}?{urlencode(params)}")
     listings = extract_party_finder_listings(payload)
     if listings is None:
         return None
 
-    valid_listings = [listing for listing in listings[:limit] if isinstance(listing, dict)]
+    valid_listings = [listing for listing in listings[:fetch_limit] if isinstance(listing, dict)]
     enriched_listings = await enrich_party_finder_v2_listings(valid_listings)
+    filtered_listings = [
+        listing
+        for listing in enriched_listings
+        if party_finder_matches_search(listing, search_text)
+    ][:limit]
     return [
         format_party_finder_api_entry(index, listing)
-        for index, listing in enumerate(enriched_listings, start=1)
+        for index, listing in enumerate(filtered_listings, start=1)
     ]
 
 
@@ -874,7 +895,7 @@ async def get_party_finder_texts(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "0.7.0",
+    "0.7.1",
     "https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru",
 )
 class TataruPlugin(Star):
