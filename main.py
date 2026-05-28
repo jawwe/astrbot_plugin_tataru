@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
+from email.utils import parsedate_to_datetime
 import html
 import json
 import random
@@ -718,10 +719,20 @@ def extract_valid_weibo_web_statuses(statuses: list[dict]) -> list[dict]:
     return result
 
 
+def format_weibo_time(value: str) -> str:
+    if not value:
+        return "未知时间"
+    try:
+        parsed = parsedate_to_datetime(value)
+        return f"{parsed.year}/{parsed.month}/{parsed.day} {parsed:%H:%M:%S}"
+    except (TypeError, ValueError, IndexError):
+        return value
+
+
 def format_weibo_status(index: int, status: dict, uid: str = WEIBO_UID) -> str:
     bid = str(status.get("bid") or status.get("mblogid"))
     title = clean_weibo_title(str(status.get("text_raw") or status.get("text") or ""))
-    created_at = str(status.get("created_at") or "未知时间")
+    created_at = format_weibo_time(str(status.get("created_at") or ""))
     weibo_url = f"{WEIBO_WEB_BASE}/{uid}/{bid}"
     return f"【{index}】{title} {created_at}\n{weibo_url}"
 
@@ -1944,7 +1955,7 @@ async def get_party_finder_texts(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "0.12.2",
+    "0.12.3",
     "https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru",
 )
 class TataruPlugin(Star):
