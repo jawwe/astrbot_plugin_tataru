@@ -52,6 +52,7 @@ CALENDAR_SOURCES = {
 QQ_DOC_URL = "https://docs.qq.com/sheet/DY2lCeEpwemZESm5q?tab=dewveu&c=A1A0A0"
 BILI_USER_ID = 15503317
 DUNGEON_NOTE_URL = "https://ff14.org/duty"
+GARLAND_BASE_URL = "https://garlandtools.cn"
 PARTY_FINDER_URL = "https://xivpf.littlenightmare.top/listings"
 PARTY_FINDER_API_V1_URL = "https://xivpf.littlenightmare.top/api/listings"
 PARTY_FINDER_API_V2_URL = "https://xivpf.littlenightmare.top/api/v2/listings"
@@ -59,6 +60,15 @@ XIVAPI_BASE_URL = "https://xivapi-v2.xivcdn.com/api"
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
 CN_WORLD_NAME_CACHE: dict[str, dict] | None = None
+GARLAND_CORE_DATA: dict | None = None
+NODE_NAME_BY_TYPE = {
+    0: "矿脉",
+    1: "石场",
+    2: "良材",
+    3: "草场",
+    4: "鱼影",
+    5: "鱼影",
+}
 PARTY_CATEGORY_LABELS = {
     "DutyRoulette": "随机任务",
     "Dungeons": "迷宫挑战",
@@ -362,10 +372,11 @@ def create_help_text() -> str:
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
+[物品 物品名] 查询物品信息
 [抽卡] 随机抽取一张FF14塔罗牌
 
 以下功能仍在迁移中：
-[看看微博] [物品] [价格] [房子] [输出]
+[看看微博] [价格] [房子] [输出]
 """
 
 
@@ -658,6 +669,242 @@ async def get_dungeon_note(dungeon_info: str) -> tuple[str, bool]:
     if not result_text.strip():
         return "攻略详情为空，请稍后再试", True
     return result_text, is_text
+
+
+def garland_url(item_category: str, item_id: str | int) -> str:
+    return f"{GARLAND_BASE_URL}/db/doc/{item_category}/chs/3/{item_id}.json"
+
+
+def strip_xiv_tags(text: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    return re.sub(r"<.*?>", "", text).strip()
+
+
+async def garland_core_value(path: str):
+    global GARLAND_CORE_DATA
+    if GARLAND_CORE_DATA is None:
+        GARLAND_CORE_DATA = await aiohttp_get(garland_url("core", "data"))
+    value = GARLAND_CORE_DATA
+    for part in path.split("."):
+        value = value[part]
+    return value
+
+
+def garland_partials(payload: dict) -> dict[tuple[str, str], dict]:
+    result = {}
+    for partial in payload.get("partials", []):
+        result[(str(partial.get("type")), str(partial.get("id")))] = partial.get("obj", {})
+    return result
+
+
+async def search_xivapi_item_id(name: str) -> tuple[int | None, str | None]:
+    query = f'Name~"{name}"'
+    params = urlencode(
+        {
+            "query": query,
+            "sheets": "Item",
+            "fields": "Name",
+            "language": "chs",
+            "limit": 8,
+        }
+    )
+    payload = await aiohttp_get(f"{XIVAPI_BASE_URL}/search?{params}")
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        return None, None
+
+    candidates = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("row_id")
+        item_name = xivapi_field_text(row, "Name")
+        if not row_id or not item_name:
+            continue
+        candidates.append((int(row_id), item_name))
+
+    if not candidates:
+        return None, None
+    for row_id, item_name in candidates:
+        if item_name == name:
+            return row_id, item_name
+    return candidates[0]
+
+
+async def download_garland_item_icon(item: dict, output_path: Path) -> bool:
+    icon = item.get("icon")
+    if not icon:
+        return False
+    icon_path = str(icon)
+    if not icon_path.startswith("t/"):
+        icon_path = "t/" + icon_path
+    image = await aiohttp_get(
+        f"{GARLAND_BASE_URL}/files/icons/item/{icon_path}.png",
+        res_type="bytes",
+    )
+    if not image:
+        return False
+    output_path.write_bytes(image)
+    return True
+
+
+def format_garland_node(node: dict) -> str:
+    node_type = NODE_NAME_BY_TYPE.get(int(node.get("t", 0)), "采集点")
+    coord = node.get("c") or []
+    coord_text = f"({coord[0]}, {coord[1]})" if len(coord) >= 2 else ""
+    time_text = ""
+    if node.get("ti"):
+        time_text = " ET " + " ".join(f"{item}时" for item in node["ti"])
+    return f"{node.get('n', '')} {node.get('l', '')}级{node_type} {coord_text}{time_text}".strip()
+
+
+async def parse_item_garland(item_id: int) -> tuple[str, dict]:
+    payload = await aiohttp_get(garland_url("item", item_id))
+    if not isinstance(payload, dict) or "item" not in payload:
+        raise ValueError("Garland 物品详情为空")
+
+    item = payload["item"]
+    partials = garland_partials(payload)
+    lines = [
+        item.get("name", f"物品 {item_id}"),
+        await garland_core_value(f"item.categoryIndex.{item.get('category', 0)}.name"),
+        f"物品等级 {item.get('ilvl', 0)}",
+    ]
+    if item.get("elvl"):
+        lines.append(f"装备等级 {item['elvl']}")
+    if item.get("jobCategories"):
+        lines.append(str(item["jobCategories"]))
+    if item.get("description"):
+        lines.append(strip_xiv_tags(item["description"]))
+
+    source_count = 0
+    if item.get("nodes"):
+        lines.append("·采集")
+        for node_id in item["nodes"][:5]:
+            node = partials.get(("node", str(node_id)))
+            if node:
+                location_name = await garland_core_value(f"locationIndex.{node.get('z')}.name")
+                lines.append(f"  -- {location_name} {format_garland_node(node)}")
+                source_count += 1
+
+    if item.get("fishingSpots"):
+        lines.append("·钓鱼")
+        for spot_id in item["fishingSpots"][:5]:
+            spot = partials.get(("fishing", str(spot_id)))
+            if spot:
+                location_name = await garland_core_value(f"locationIndex.{spot.get('z')}.name")
+                coord = f"({spot.get('x')}, {spot.get('y')})" if spot.get("x") is not None else ""
+                lines.append(f"  -- {location_name} {spot.get('n', '')} {spot.get('l', '')}级 {coord}")
+                source_count += 1
+
+    if item.get("craft"):
+        jobs = await garland_core_value("jobs")
+        lines.append("·制作")
+        for craft in item["craft"][:3]:
+            job = jobs[craft["job"]]["name"]
+            lines.append(f"  -- {job} {craft.get('lvl', '')}级")
+            ingredients = []
+            for ingredient in craft.get("ingredients", [])[:6]:
+                if ingredient.get("id", 0) < 20:
+                    continue
+                ingredient_item = partials.get(("item", str(ingredient["id"])), {})
+                ingredients.append(f"{ingredient_item.get('n', ingredient['id'])}*{ingredient.get('amount', 1)}")
+            if ingredients:
+                lines.append("     " + "、".join(ingredients))
+            source_count += 1
+
+    if item.get("vendors"):
+        lines.append(f"·商店贩售 {item.get('price', 0)}金币")
+        for vendor_id in item["vendors"][:5]:
+            vendor = partials.get(("npc", str(vendor_id)))
+            if vendor:
+                location = ""
+                if vendor.get("l"):
+                    location = await garland_core_value(f"locationIndex.{vendor['l']}.name")
+                coord = vendor.get("c") or []
+                coord_text = f"({coord[0]}, {coord[1]})" if len(coord) >= 2 else ""
+                lines.append(f"  -- {vendor.get('n', '')} {location} {coord_text}".strip())
+                source_count += 1
+        if len(item["vendors"]) > 5:
+            lines.append(f"  -- 等共计{len(item['vendors'])}个商人售卖")
+
+    trades = item.get("tradeCurrency", []) + item.get("tradeShops", [])
+    if trades:
+        lines.append("·兑换")
+        for trade in trades[:3]:
+            shop_name = "商店交易" if trade.get("shop") == "Shop" else trade.get("shop", "兑换")
+            lines.append(f"  -- {shop_name}")
+            for listing in trade.get("listings", [])[:2]:
+                currencies = []
+                for currency in listing.get("currency", [])[:3]:
+                    currency_item = partials.get(("item", str(currency.get("id"))), {})
+                    currencies.append(f"{currency_item.get('n', currency.get('id'))}*{currency.get('amount', 1)}")
+                if currencies:
+                    lines.append("     使用 " + "、".join(currencies))
+            source_count += 1
+
+    if item.get("drops"):
+        lines.append("·怪物掉落")
+        for mob_id in item["drops"][:5]:
+            mob = partials.get(("mob", str(mob_id)))
+            if mob:
+                location = await garland_core_value(f"locationIndex.{mob.get('z')}.name")
+                lines.append(f"  -- {mob.get('n', '')} {location}")
+                source_count += 1
+
+    if item.get("instances"):
+        lines.append("·副本获取")
+        for duty_id in item["instances"][:5]:
+            duty = partials.get(("instance", str(duty_id)))
+            if duty:
+                lines.append(f"  -- {duty.get('min_lvl', '')}级 {duty.get('n', '')}")
+                source_count += 1
+
+    if item.get("quests"):
+        lines.append("·任务奖励")
+        for quest_id in item["quests"][:5]:
+            quest = partials.get(("quest", str(quest_id)))
+            if quest:
+                lines.append(f"  -- {quest.get('n', '')}")
+                source_count += 1
+
+    if source_count == 0:
+        lines.append("获取方式较麻烦/没查到，烦请打开网页查看！")
+
+    status = []
+    if item.get("unique"):
+        status.append("独占")
+    if "tradeable" in item:
+        status.append("可交易" if item.get("tradeable") else "不可交易")
+    if "unlistable" in item:
+        status.append("不可在市场上交易" if item.get("unlistable") else "可在市场上交易")
+    if item.get("storable"):
+        status.append("可放入收藏柜")
+    if status:
+        lines.append(" ".join(status))
+
+    lines.append(f"{GARLAND_BASE_URL}/db/#item/{item_id}")
+    return "\n".join(line for line in lines if str(line).strip()), item
+
+
+async def create_item_info(item_name: str, cache_dir: Path) -> tuple[str, Path | None]:
+    if item_name.isdigit():
+        item_id = int(item_name)
+    else:
+        item_id, found_name = await search_xivapi_item_id(item_name)
+        if not item_id:
+            return f'在最终幻想XIV中没有找到"{item_name}"', None
+        if found_name and found_name != item_name:
+            logger.info(f"物品搜索 {item_name} 匹配到 {found_name} ({item_id})")
+
+    text, item = await parse_item_garland(item_id)
+    icon_path = cache_dir / f"item_{item_id}.png"
+    try:
+        has_icon = await download_garland_item_icon(item, icon_path)
+    except Exception as exc:
+        logger.warning(f"物品图标下载失败: {exc}")
+        has_icon = False
+    return text, icon_path if has_icon else None
 
 
 def party_optional_text(value) -> str:
@@ -1112,7 +1359,7 @@ async def get_party_finder_texts(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "0.8.0",
+    "0.9.0",
     "https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru",
 )
 class TataruPlugin(Star):
@@ -1229,6 +1476,29 @@ class TataruPlugin(Star):
             image_components.append(Comp.Image.fromFileSystem(str(image_path)))
 
         yield event.chain_result(image_components)
+
+    @filter.command("物品")
+    async def item(self, event: AstrMessageEvent):
+        """查询物品信息。"""
+        item_name = command_args(event.message_str, "物品")
+        if not item_name:
+            yield event.plain_result("查物品格式：物品 物品名\n例：物品 铁矿")
+            return
+
+        try:
+            item_text, icon_path = await create_item_info(item_name, self.cache_dir)
+        except Exception as exc:
+            logger.warning(f"物品查询失败: {exc}")
+            yield event.plain_result("物品查询失败，请稍后再试")
+            return
+
+        text_image_path = self.cache_dir / "item_text.jpg"
+        text_to_image(item_text, text_image_path, width_now=34)
+        components = []
+        if icon_path:
+            components.append(Comp.Image.fromFileSystem(str(icon_path)))
+        components.append(Comp.Image.fromFileSystem(str(text_image_path)))
+        yield event.chain_result(components)
 
     @filter.command("抽卡")
     async def tarot(self, event: AstrMessageEvent):
