@@ -27,6 +27,7 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 | `物品` | 查询物品基础信息和获取方式 | 图标 + 图片 |
 | `价格` | 查询市场板物价 | 图片 |
 | `房子` / `房屋` | 查询指定服务器空房 | 图片，参数错误时返回文本 |
+| `输出` | 查询 FFLogs 输出分位 | 文本 |
 | `抽卡` | 随机抽取一张 FF14 塔罗牌 | 文字图片 + 塔罗牌图片 |
 
 ## 命令说明
@@ -201,6 +202,33 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 
 数据源：优先使用 [艾欧泽亚售楼中心](https://house.ffxiv.cyou/) 的 `https://house.ffxiv.cyou/api/sales` API。
 
+### 输出
+
+```text
+输出 海德林 武士
+输出 海德林 武士 国服
+输出 海德林 武士 国服 rdps
+输出 海德林 武士 国服 day10
+```
+
+参数能力：
+
+- `boss名` 支持原 TataruBot2 内置 boss 数据里的中文名、英文名和别名。
+- `职业名` 支持中文名、英文名和原数据内置别名。
+- 默认查询国际服、`adps`、最新一天。
+- 加 `国服` 查询国服 FFLogs。
+- 加 `rdps` 查询 rDPS，否则默认按 aDPS。
+- 加 `dayN` 查询网页 statistics table 中第 N 天数据。
+
+返回文本内容包含：服务器、DPS 类型、数据源、版本分区、副本、boss、职业、天数，以及 10%、25%、50%、75%、95%、99%、100% 分位。
+
+配置项：
+
+- `FFLogs API Client ID`
+- `FFLogs API Client Secret`
+
+数据源优先级：配置 FFLogs API 凭据时优先使用 FFLogs OAuth + GraphQL API；未配置、API 数据分页过多、使用 `dayN` 历史日参数或 API 失败时，回退到 FFLogs statistics table 网页解析。
+
 ### 抽卡
 
 ```text
@@ -217,10 +245,12 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 | --- | --- | --- |
 | `默认使用国际服日历` | `false` | 控制 `日历` 命令无参数时默认查询国服还是国际服。 |
 | `微博 Cookie` | 空 | 可选。供 `看看微博` 请求微博移动端接口时使用，提高稳定性。 |
+| `FFLogs API Client ID` | 空 | 可选。供 `输出` 优先调用 FFLogs API。 |
+| `FFLogs API Client Secret` | 空 | 可选。供 `输出` 获取 FFLogs OAuth token。 |
 
 ## 后续待迁移
 
-- `输出`
+暂无。
 
 ## 使用的项目和服务
 
@@ -238,5 +268,7 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 - [腾讯文档](https://docs.qq.com/)：暖暖功能兜底链接。
 - [Bilibili](https://www.bilibili.com/)：暖暖视频来源之一。
 - [微博](https://weibo.com/1797798792)：`看看微博` 的 FF14 官方微博数据源。
+- [FFLogs API](https://cn.fflogs.com/api/docs)：`输出` 的优先数据源。
+- [fflogsapi](https://fflogsapi.readthedocs.io/en/latest/index.html)：FFLogs API 调用方式参考。
 - [Pillow](https://python-pillow.org/)：文本转图片渲染。
 - [icalendar](https://icalendar.readthedocs.io/)：ICS 日历解析。

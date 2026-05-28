@@ -10,5 +10,17 @@
     "type": "string",
     "default": "",
     "hint": "可选。用于“看看微博”命令请求微博移动端接口；不填写也会尝试公开访问，但微博可能返回 432 或限流。"
+  },
+  "fflogs_client_id": {
+    "description": "FFLogs API Client ID",
+    "type": "string",
+    "default": "",
+    "hint": "可选。用于“输出”命令优先调用 FFLogs v2 API；不填写时会直接使用网页兜底。"
+  },
+  "fflogs_client_secret": {
+    "description": "FFLogs API Client Secret",
+    "type": "string",
+    "default": "",
+    "hint": "可选。用于“输出”命令获取 FFLogs OAuth token。请不要公开分享该字段。"
   }
 }

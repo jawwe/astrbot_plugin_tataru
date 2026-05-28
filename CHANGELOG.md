@@ -1,5 +1,13 @@
 # 更新日志
 
+## v0.13.0
+
+### 新增
+
+- 新增 `输出` 命令，查询 FFLogs 指定 boss 和职业的 DPS 分位。
+- 新增 `fflogs_client_id` 和 `fflogs_client_secret` 配置项，优先使用 FFLogs OAuth + GraphQL API 查询数据。
+- `输出` 在 API 无凭据、分页过多、`dayN` 历史日查询或 API 失败时，会回退到原 FFLogs statistics table 网页解析。
+
 ## v0.12.3
 
 ### 优化

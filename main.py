@@ -22,6 +22,8 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 DATA_DIR = PLUGIN_DIR / "data"
 TAROT_DIR = DATA_DIR / "TarotImages"
 TAROT_JSON = TAROT_DIR / "ff14_tarot.json"
+JOB_JSON = DATA_DIR / "job.json"
+BOSS_JSON = DATA_DIR / "boss.json"
 FONT_PATH = DATA_DIR / "simhei.ttf"
 DEFAULT_CN_CALENDAR_PATH = DATA_DIR / "calendar.ics"
 CALENDAR_SOURCES = {
@@ -57,6 +59,9 @@ WEIBO_API_BASE = "https://m.weibo.cn/api/container/getIndex"
 WEIBO_MOBILE_BASE = "https://m.weibo.cn"
 WEIBO_WEB_BASE = "https://weibo.com"
 WEIBO_WEB_TIMELINE_API = "https://weibo.com/ajax/statuses/mymblog"
+FFLOGS_HOSTS = {False: "https://www.fflogs.com", True: "https://cn.fflogs.com"}
+FFLOGS_PERCENTILES = [10, 25, 50, 75, 95, 99, 100]
+FFLOGS_API_MAX_PAGES = 20
 DUNGEON_NOTE_URL = "https://ff14.org/duty"
 GARLAND_BASE_URL = "https://garlandtools.cn"
 PARTY_FINDER_URL = "https://xivpf.littlenightmare.top/listings"
@@ -358,6 +363,15 @@ class HouseQuery:
     limit: int
 
 
+@dataclass
+class LogsQuery:
+    boss_name: str | None
+    job_name: str | None
+    cn_source: bool
+    dps_type: str
+    day: int
+
+
 async def aiohttp_get(url: str, res_type: str = "json", timeout_seconds: int = 15, headers: dict | None = None):
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -447,6 +461,12 @@ def load_tarot() -> dict:
         return json.load(tarot_file)
 
 
+def load_json_list(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8-sig") as json_file:
+        data = json.load(json_file)
+    return data if isinstance(data, list) else []
+
+
 def choose_tarot(tarot_dict: dict) -> tuple[str, Path]:
     info_now = tarot_dict["_塔罗牌堆"][random.randint(0, 43)]
     text_now = info_now.split("[", 1)[0]
@@ -467,10 +487,10 @@ def create_help_text() -> str:
 [物品 物品名] 查询物品信息
 [价格 (大区/服务器) 物品名 (HQ) (数量)] 查询市场物价
 [房子 服务器名 主城名 房子大小] 查询空房
+[输出 boss名 职业名 (国服) (rdps) (day2)] 查询FFLogs输出分段
 [抽卡] 随机抽取一张FF14塔罗牌
 
 以下功能仍在迁移中：
-[输出]
 """
 
 
@@ -1302,6 +1322,288 @@ async def create_market_text(query: MarketQuery) -> str:
     return "\n".join(lines)
 
 
+def parse_logs_query(query: str) -> LogsQuery:
+    parts = query.split()
+    boss_name = parts[0] if len(parts) > 0 else None
+    job_name = parts[1] if len(parts) > 1 else None
+    cn_source = "国服" in parts
+    dps_type = "rdps" if any(part.lower() == "rdps" for part in parts) else "adps"
+    day = -1
+    for part in parts[2:]:
+        lower = part.lower()
+        if lower.startswith("day"):
+            try:
+                day = int(lower.replace("day", "", 1)) - 1
+            except ValueError:
+                day = -2
+            break
+    return LogsQuery(boss_name, job_name, cn_source, dps_type, day)
+
+
+def find_logs_job(job_name: str | None) -> dict | None:
+    if not job_name:
+        return None
+    for item in load_json_list(JOB_JSON):
+        aliases = item.get("nickname", [])
+        if job_name in {item.get("name"), item.get("cn_name")} or job_name in aliases:
+            return item
+    return None
+
+
+def find_logs_boss(boss_name: str | None) -> dict | None:
+    if not boss_name:
+        return None
+    for item in load_json_list(BOSS_JSON):
+        aliases = item.get("nickname", [])
+        if boss_name in {item.get("name"), item.get("cn_name")} or boss_name in aliases:
+            return item
+    return None
+
+
+def fflogs_region_entries(boss: dict, cn_source: bool) -> list[str]:
+    regions = boss.get("cn_region" if cn_source else "region", [])
+    return [region for region in regions if isinstance(region, str) and "###" in region]
+
+
+def fflogs_metric_for_api(dps_type: str) -> str:
+    return "rdps" if dps_type == "rdps" else "dps"
+
+
+async def get_fflogs_token(host: str, client_id: str, client_secret: str) -> str:
+    timeout = aiohttp.ClientTimeout(total=20)
+    auth = aiohttp.BasicAuth(client_id, client_secret)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            f"{host}/oauth/token",
+            data={"grant_type": "client_credentials"},
+            auth=auth,
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"FFLogs token 请求失败：{response.status}")
+            payload = await response.json(content_type=None)
+    token = payload.get("access_token") if isinstance(payload, dict) else None
+    if not token:
+        raise RuntimeError("FFLogs token 响应缺少 access_token")
+    return token
+
+
+async def fflogs_graphql(host: str, token: str, query: str, variables: dict) -> dict:
+    timeout = aiohttp.ClientTimeout(total=25)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.post(
+            f"{host}/api/v2/client",
+            json={"query": query, "variables": variables},
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"FFLogs GraphQL 请求失败：{response.status}")
+            payload = await response.json(content_type=None)
+    if isinstance(payload, dict) and payload.get("errors"):
+        raise RuntimeError("FFLogs GraphQL 返回错误")
+    return payload if isinstance(payload, dict) else {}
+
+
+async def fetch_fflogs_rankings_api(
+    host: str,
+    token: str,
+    boss: dict,
+    job: dict,
+    partition_id: int,
+    dps_type: str,
+) -> tuple[list[float], int, bool]:
+    query = """
+    query($id: Int!, $difficulty: Int!, $partition: Int!, $metric: CharacterRankingMetricType!, $spec: String!, $page: Int!) {
+      worldData {
+        encounter(id: $id) {
+          characterRankings(difficulty: $difficulty, partition: $partition, metric: $metric, specName: $spec, page: $page)
+        }
+      }
+    }
+    """
+    amounts = []
+    count = 0
+    has_more = True
+    page = 1
+    while has_more and page <= FFLOGS_API_MAX_PAGES:
+        payload = await fflogs_graphql(
+            host,
+            token,
+            query,
+            {
+                "id": int(boss["pk"]),
+                "difficulty": int(boss["savage"]),
+                "partition": int(partition_id),
+                "metric": fflogs_metric_for_api(dps_type),
+                "spec": job["name"],
+                "page": page,
+            },
+        )
+        ranking = (
+            payload.get("data", {})
+            .get("worldData", {})
+            .get("encounter", {})
+            .get("characterRankings", {})
+        )
+        if not isinstance(ranking, dict):
+            break
+        count = int(ranking.get("count") or count or 0)
+        for item in ranking.get("rankings", []):
+            if not isinstance(item, dict):
+                continue
+            amount = item.get("amount")
+            if amount is None:
+                metric_key = "rDPS" if dps_type == "rdps" else "aDPS"
+                amount = item.get(metric_key)
+            if amount is not None:
+                amounts.append(float(amount))
+        has_more = bool(ranking.get("hasMorePages"))
+        page += 1
+    return amounts, count, has_more
+
+
+def percentile_from_rankings(amounts: list[float], percentile: int) -> float:
+    if not amounts:
+        return 0.0
+    amounts = sorted(amounts, reverse=True)
+    if percentile == 100:
+        return amounts[0]
+    rank = max(1, int((len(amounts) * (100 - percentile) + 99) // 100))
+    index = min(len(amounts) - 1, rank - 1)
+    return amounts[index]
+
+
+def normalize_fflogs_result(
+    stat: dict,
+    query: LogsQuery,
+    boss: dict,
+    job: dict,
+    region_info: str,
+    source_label: str,
+) -> str:
+    lines = [
+        f"服务器: {'国服' if query.cn_source else '国际服'}  dps类型: {query.dps_type}",
+        f"数据源: {source_label}",
+        f"版本: {region_info}",
+        f"副本: {boss['cn_zone_name']}",
+        f"boss: {boss['cn_name']}",
+        f"职业: {job['cn_name']}  天数: {stat.get('day', '最新')}",
+    ]
+    lines.extend(f"{percentile}%: {stat[str(percentile)]:.2f}" for percentile in FFLOGS_PERCENTILES)
+    return "\n".join(lines)
+
+
+async def create_logs_text_api(query: LogsQuery, boss: dict, job: dict, client_id: str, client_secret: str) -> str:
+    if query.day != -1:
+        raise RuntimeError("FFLogs API 不提供旧版 dayN 分位曲线，使用网页兜底")
+    if not client_id or not client_secret:
+        raise RuntimeError("未配置 FFLogs API 凭据")
+
+    regions = fflogs_region_entries(boss, query.cn_source)
+    if not regions:
+        raise RuntimeError("没有可用分区")
+    region_info, partition_text = regions[-1].split("###", 1)
+    host = FFLOGS_HOSTS[query.cn_source]
+    token = await get_fflogs_token(host, client_id, client_secret)
+    amounts, count, has_more = await fetch_fflogs_rankings_api(
+        host,
+        token,
+        boss,
+        job,
+        int(partition_text),
+        query.dps_type,
+    )
+    if not amounts:
+        raise RuntimeError("FFLogs API 未返回排行榜")
+    if has_more or (count and len(amounts) < count):
+        raise RuntimeError("FFLogs API 排行榜分页过多，使用网页兜底以保持分位准确")
+    stat = {"day": "最新"}
+    for percentile in FFLOGS_PERCENTILES:
+        stat[str(percentile)] = percentile_from_rankings(amounts, percentile)
+    return normalize_fflogs_result(stat, query, boss, job, region_info, "FFLogs API")
+
+
+async def fetch_logs_statistics_page(query: LogsQuery, boss: dict, job: dict) -> tuple[str, str] | None:
+    regions = fflogs_region_entries(boss, query.cn_source)
+    if not regions:
+        return None
+    host = FFLOGS_HOSTS[query.cn_source]
+    search_range = [regions[-index - 1] for index in range(len(regions))]
+    for region_entry in search_range:
+        region_info, region_id = region_entry.split("###", 1)
+        url = (
+            f"{host}/zone/statistics/table/"
+            f"{boss['quest']}/dps/{boss['pk']}/{boss['savage']}/8/{int(region_id)}/100/1000/7/"
+            f"{boss['patch']}/Global/{job['name']}/All/0/normalized/single/0/-1/?"
+            f"keystone=15&dpstype={query.dps_type}"
+        )
+        page = await aiohttp_get(url, res_type="text", headers={"Referer": host})
+        if isinstance(page, str) and "data.push" in page:
+            return page, region_info
+    return None
+
+
+def parse_logs_statistics_page(page: str) -> list[dict]:
+    statistics = {}
+    for percentile in FFLOGS_PERCENTILES:
+        series_name = "" if percentile == 100 else str(percentile)
+        pattern = rf"series{series_name}\.data\.push\(([+-]?(?:0|[1-9]\d*)(?:\.\d+)?)\)"
+        statistics[str(percentile)] = [float(value) for value in re.findall(pattern, page)]
+    total_length = len(statistics["100"])
+    if not total_length or any(len(statistics[str(percentile)]) != total_length for percentile in FFLOGS_PERCENTILES):
+        return []
+
+    def all_zero(index: int) -> bool:
+        return sum(statistics[str(percentile)][index] for percentile in FFLOGS_PERCENTILES) == 0
+
+    left = 0
+    right = total_length - 1
+    while left < total_length and all_zero(left):
+        left += 1
+    while right >= 0 and all_zero(right):
+        right -= 1
+    if left > right:
+        return []
+
+    rows = []
+    for index in range(left, right + 1):
+        item = {"day": len(rows) + 1}
+        for percentile in FFLOGS_PERCENTILES:
+            item[str(percentile)] = statistics[str(percentile)][index]
+        rows.append(item)
+    return rows
+
+
+async def create_logs_text_crawl(query: LogsQuery, boss: dict, job: dict) -> str:
+    result = await fetch_logs_statistics_page(query, boss, job)
+    if not result:
+        return "查不到数据，怎么回事呢？"
+    page, region_info = result
+    rows = parse_logs_statistics_page(page)
+    if not rows:
+        return "No data found"
+    row = rows[-1] if query.day == -1 or query.day >= len(rows) else rows[query.day]
+    return normalize_fflogs_result(row, query, boss, job, region_info, "网页兜底")
+
+
+async def create_logs_text(query: LogsQuery, client_id: str, client_secret: str) -> str:
+    if not query.boss_name or not query.job_name:
+        return "查logs格式：输出 boss名 职业名 (国服) (rdps) (day2)\n例：输出 海德林 武士"
+    if query.day == -2:
+        return "day格式不对，例如：day2"
+    job = find_logs_job(query.job_name)
+    if not job:
+        return "检查职业名称是否正确"
+    boss = find_logs_boss(query.boss_name)
+    if not boss:
+        return "检查boss名称是否正确"
+
+    try:
+        return await create_logs_text_api(query, boss, job, client_id, client_secret)
+    except Exception as exc:
+        logger.info(f"FFLogs API 查询失败，尝试网页兜底: {exc}")
+    return await create_logs_text_crawl(query, boss, job)
+
+
 def party_optional_text(value) -> str:
     if value is None:
         return ""
@@ -1955,7 +2257,7 @@ async def get_party_finder_texts(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "0.12.3",
+    "0.13.0",
     "https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru",
 )
 class TataruPlugin(Star):
@@ -1978,6 +2280,12 @@ class TataruPlugin(Star):
 
     def weibo_cookie(self) -> str:
         return str(self.config.get("weibo_cookie", "") or "").strip()
+
+    def fflogs_client_id(self) -> str:
+        return str(self.config.get("fflogs_client_id", "") or "").strip()
+
+    def fflogs_client_secret(self) -> str:
+        return str(self.config.get("fflogs_client_secret", "") or "").strip()
 
     @filter.command("帮帮忙")
     async def help(self, event: AstrMessageEvent):
@@ -2160,6 +2468,18 @@ class TataruPlugin(Star):
             text_to_image(page_text, image_path, width_now=44)
             components.append(Comp.Image.fromFileSystem(str(image_path)))
         yield event.chain_result(components)
+
+    @filter.command("输出")
+    async def logs_dps(self, event: AstrMessageEvent):
+        """查询FFLogs输出分段。"""
+        logs_query = parse_logs_query(command_args(event.message_str, "输出"))
+        yield event.plain_result(
+            await create_logs_text(
+                logs_query,
+                self.fflogs_client_id(),
+                self.fflogs_client_secret(),
+            )
+        )
 
     @filter.command("抽卡")
     async def tarot(self, event: AstrMessageEvent):
