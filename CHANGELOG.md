@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.14.5
+
+### 修复
+
+- `输出` 的 FFLogs statistics table 默认参数改为 `dataset=99`、`bracket=6`，匹配当前网页 URL 中的默认统计口径。
+- `输出` 支持在命令中追加 `dataset99` / `dataset=99`、`bracket6` / `bracket=6` 覆盖 statistics table 参数。
+
 ## v0.14.4
 
 ### 修复

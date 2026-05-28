@@ -211,6 +211,7 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 输出 海德林 武士 国服 adps
 输出 海德林 武士 国服 pdps
 输出 海德林 武士 国服 day10
+输出 海德林 武士 国际服 dataset99 bracket6
 ```
 
 参数能力：
@@ -221,6 +222,7 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 - 加 `国际服` 查询国际服 FFLogs；加 `国服` 查询国服 FFLogs。
 - 支持显式指定 `rdps`、`adps`、`pdps`、`ndps`、`cdps`；默认 `rdps` 不向 FFLogs statistics table 传 `dpstype` 参数。
 - 加 `dayN` 查询网页 statistics table 中第 N 天数据。
+- 可追加 `dataset99` / `dataset=99`、`bracket6` / `bracket=6` 覆盖 FFLogs statistics table 参数；默认使用 `dataset=99`、`bracket=6`。
 
 返回文本内容包含：服务器、DPS 类型、数据源、版本分区、副本、boss、职业、天数，以及 10%、25%、50%、75%、95%、99%、100% 分位。
 
