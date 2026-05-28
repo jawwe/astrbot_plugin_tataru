@@ -229,7 +229,7 @@ https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru
 - `FFLogs API Client ID`
 - `FFLogs API Client Secret`
 
-数据源优先级：分位数据使用对应站点的 FFLogs statistics table 网页解析，以保证国服 `cn.fflogs.com` 和国际服 `www.fflogs.com` 数据口径分开；配置 FFLogs API 凭据后，本地 boss 映射查不到时会使用 FFLogs metadata 动态匹配 boss。
+数据源优先级：分位数据使用对应站点的 FFLogs statistics table 网页解析，并使用网页统计表的 DPS 聚合口径；配置 FFLogs API 凭据后，本地 boss 映射查不到时会使用 FFLogs metadata 动态匹配 boss。
 
 ### 抽卡
 

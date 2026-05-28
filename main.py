@@ -1618,7 +1618,7 @@ async def fetch_logs_statistics_page(query: LogsQuery, boss: dict, job: dict) ->
         url = (
             f"{host}/zone/statistics/table/"
             f"{boss['quest']}/dps/{boss['pk']}/{boss['savage']}/8/{int(region_id)}/100/1000/7/"
-            f"{boss['patch']}/Global/{job['name']}/All/0/normalized/single/0/-1/?"
+            f"{boss['patch']}/Global/{job['name']}/All/0/amount/single/0/-1/?"
             f"{urlencode(params)}"
         )
         page = await aiohttp_get(url, res_type="text", headers={"Referer": host})

@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.14.4
+
+### 修复
+
+- `输出` 的 FFLogs statistics table 聚合口径从 `normalized` 改为 `amount`，匹配网页统计表的 DPS / Max 数值口径。
+
 ## v0.14.3
 
 ### 修复
