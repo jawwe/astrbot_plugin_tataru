@@ -5,7 +5,7 @@ import json
 import random
 import re
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import aiohttp
 from astrbot.api import logger
@@ -52,6 +52,7 @@ QQ_DOC_URL = "https://docs.qq.com/sheet/DY2lCeEpwemZESm5q?tab=dewveu&c=A1A0A0"
 BILI_USER_ID = 15503317
 DUNGEON_NOTE_URL = "https://ff14.org/duty"
 PARTY_FINDER_URL = "https://xivpf.littlenightmare.top/listings"
+PARTY_FINDER_API_V1_URL = "https://xivpf.littlenightmare.top/api/listings"
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 PARTY_CATEGORY_LABELS = {
     "DutyRoulette": "随机任务",
@@ -514,7 +515,123 @@ async def get_dungeon_note(dungeon_info: str) -> tuple[str, bool]:
     return result_text, is_text
 
 
-async def get_party_finder_texts(data_centre: str, category: str | None = None, limit: int = 10) -> list[str]:
+def party_optional_text(value) -> str:
+    if value is None:
+        return ""
+    return html.unescape(str(value)).strip()
+
+
+def format_party_time_left(seconds_value) -> str:
+    try:
+        seconds = int(float(seconds_value))
+    except (TypeError, ValueError):
+        return ""
+
+    if seconds <= 0:
+        return "已过期"
+    minutes = max(1, seconds // 60)
+    if minutes < 60:
+        return f"剩余 {minutes} 分"
+    hours = minutes // 60
+    rest_minutes = minutes % 60
+    if rest_minutes:
+        return f"剩余 {hours} 小时 {rest_minutes} 分"
+    return f"剩余 {hours} 小时"
+
+
+def format_party_updated_at(updated_at: str) -> str:
+    if not updated_at:
+        return ""
+    try:
+        updated_time = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        now = datetime.now(updated_time.tzinfo)
+        seconds = int((now - updated_time).total_seconds())
+    except ValueError:
+        return f"更新 {updated_at}"
+
+    if seconds < 60:
+        return "刚刚更新"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} 分钟前更新"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前更新"
+    return f"{hours // 24} 天前更新"
+
+
+def format_party_finder_api_entry(index: int, listing: dict) -> str:
+    category_now = party_optional_text(listing.get("category"))
+    category_label = PARTY_CATEGORY_LABELS.get(category_now, category_now or "未知分类")
+    duty_now = party_optional_text(listing.get("duty")) or "无"
+    description_now = party_optional_text(listing.get("description")) or "无描述"
+    creator_now = party_optional_text(listing.get("name") or listing.get("player_name")) or "未知"
+    world_now = party_optional_text(listing.get("created_world") or listing.get("home_world"))
+    if not world_now:
+        world_id = listing.get("created_world_id") or listing.get("home_world_id")
+        world_now = f"世界ID {world_id}" if world_id else "未知世界"
+
+    filled = listing.get("slots_filled")
+    available = listing.get("slots_available")
+    total_now = ""
+    if filled is not None and available is not None:
+        try:
+            total_now = f"{filled}/{int(filled) + int(available)}"
+        except (TypeError, ValueError):
+            total_now = f"{filled}/{available}"
+
+    item_level = listing.get("min_item_level")
+    item_level_text = f"IL {item_level}" if item_level else ""
+    time_left = format_party_time_left(listing.get("time_left") or listing.get("time_left_seconds"))
+    updated_text = format_party_updated_at(party_optional_text(listing.get("updated_at")))
+    meta_parts = [f"{creator_now} @ {world_now}", total_now, item_level_text, time_left, updated_text]
+    meta_text = " | ".join(part for part in meta_parts if part)
+
+    text_now = f"{index:02d}. [{category_label}] {duty_now}\n"
+    text_now += f"    {truncate_text(description_now, 86)}\n"
+    text_now += f"    {meta_text}\n"
+    return text_now
+
+
+def extract_party_finder_listings(payload) -> list[dict] | None:
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("listings"), list):
+        return data["listings"]
+    if isinstance(payload.get("listings"), list):
+        return payload["listings"]
+    return None
+
+
+async def get_party_finder_texts_api_v1(
+    data_centre: str,
+    category: str | None = None,
+    limit: int = 10,
+) -> list[str] | None:
+    params = {
+        "page": 1,
+        "per_page": max(1, min(limit, 100)),
+        "datacenter": data_centre,
+    }
+    if category:
+        params["category"] = category
+    payload = await aiohttp_get(f"{PARTY_FINDER_API_V1_URL}?{urlencode(params)}")
+    listings = extract_party_finder_listings(payload)
+    if listings is None:
+        return None
+
+    text_list = []
+    for index, listing in enumerate(listings[:limit], start=1):
+        if not isinstance(listing, dict):
+            continue
+        text_list.append(format_party_finder_api_entry(index, listing))
+    return text_list
+
+
+async def get_party_finder_texts_html(data_centre: str, category: str | None = None, limit: int = 10) -> list[str]:
     all_info = await aiohttp_get(PARTY_FINDER_URL, res_type="text")
     if not all_info:
         raise ValueError("获取招募板失败")
@@ -567,11 +684,22 @@ async def get_party_finder_texts(data_centre: str, category: str | None = None, 
     return text_list
 
 
+async def get_party_finder_texts(data_centre: str, category: str | None = None, limit: int = 10) -> list[str]:
+    try:
+        api_texts = await get_party_finder_texts_api_v1(data_centre, category=category, limit=limit)
+        if api_texts is not None:
+            return api_texts
+    except Exception as exc:
+        logger.warning(f"招募板 API v1 获取失败，尝试 HTML 兜底: {exc}")
+
+    return await get_party_finder_texts_html(data_centre, category=category, limit=limit)
+
+
 @register(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "0.5.0",
+    "0.6.0",
     "https://github.com/jawwe/TataruBot2/tree/codex-astrbot-plugin-tataru",
 )
 class TataruPlugin(Star):
