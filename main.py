@@ -1769,6 +1769,28 @@ def fflogs_debug_td_samples(page: str, pattern: str, limit: int = 3) -> list[str
     return samples
 
 
+def fflogs_debug_script_sources(page: str, limit: int = 12) -> list[str]:
+    sources = re.findall(r"<script\b[^>]*\bsrc=[\"']([^\"']+)[\"']", page, flags=re.IGNORECASE)
+    return [html.unescape(source) for source in sources[:limit]]
+
+
+def fflogs_debug_urls(page: str, limit: int = 12) -> list[str]:
+    urls = re.findall(r"(?:https?:)?//[^\"'<>\\\s]+|(?<!<)/[^\"'<>\\\s]*(?:statistics|api|rankings|table)[^\"'<>\\\s]*", page)
+    deduped = []
+    for url in urls:
+        value = html.unescape(url)
+        if value not in deduped:
+            deduped.append(value)
+            if len(deduped) >= limit:
+                break
+    return deduped
+
+
+def fflogs_debug_table_tags(page: str, limit: int = 5) -> list[str]:
+    tables = re.findall(r"<table\b[^>]*>", page, flags=re.IGNORECASE)
+    return [html.unescape(table)[:180] for table in tables[:limit]]
+
+
 def parse_logs_statistics_summary_row(page: str, job: dict) -> dict | None:
     job_names = [name for name in [job.get("cn_name"), job.get("name")] if isinstance(name, str) and name]
     rows = re.findall(r"<tr\b[^>]*>.*?</tr>", page, flags=re.IGNORECASE | re.DOTALL)
@@ -1850,6 +1872,10 @@ def log_fflogs_statistics_page_diagnostics(page: str, job: dict) -> None:
         "primary_td_count": len(re.findall(r"<td\b[^>]*\bprimary\b", decoded, flags=re.IGNORECASE)),
         "main_table_number_td_count": len(re.findall(r"<td\b[^>]*\bmain-table-number\b", decoded, flags=re.IGNORECASE)),
         "primary_main_table_cell_count": len(primary_cells),
+        "datatable_string_count": decoded.count("DataTables"),
+        "summary_table_string_count": decoded.count("summary-table"),
+        "main_table_number_string_count": decoded.count("main-table-number"),
+        "statistics_table_string_count": decoded.count("statistics/table"),
     }
     logger.info(f"FFLogs statistics page diagnostics: len={len(page)} markers={markers}")
     logger.info(f"FFLogs statistics primary values sample: {primary_values[:8]}")
@@ -1858,6 +1884,9 @@ def log_fflogs_statistics_page_diagnostics(page: str, job: dict) -> None:
     logger.info(f"FFLogs statistics descending blocks sample: {global_blocks}")
     logger.info(f"FFLogs statistics main-table-number td samples: {fflogs_debug_td_samples(decoded, r'main-table-number')}")
     logger.info(f"FFLogs statistics primary td samples: {fflogs_debug_td_samples(decoded, r'\\bprimary\\b')}")
+    logger.info(f"FFLogs statistics script src sample: {fflogs_debug_script_sources(decoded)}")
+    logger.info(f"FFLogs statistics url sample: {fflogs_debug_urls(decoded)}")
+    logger.info(f"FFLogs statistics table tag sample: {fflogs_debug_table_tags(decoded)}")
 
 
 async def fetch_logs_statistics_summary(query: LogsQuery, boss: dict, job: dict) -> tuple[dict, str] | None:
