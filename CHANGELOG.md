@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.14.9
+
+### 修复
+
+- `输出` 查询 FFLogs statistics table 时优先使用 `persecondamount`，更贴近网页默认展示的 DPS 百分位。
+- 移除 FFLogs statistics table 请求中与 FF14 统计页无关的 `keystone=15` 参数，避免额外筛选影响结果。
+
 ## v0.14.8
 
 ### 修复
