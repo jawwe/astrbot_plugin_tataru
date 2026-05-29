@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.14.15
+
+### 修复
+
+- `输出` 解析 FFLogs statistics 页面时优先读取底部表格中的 `td.main-table-number.primary` 秒伤单元格，匹配网页当前实际 DOM 结构。
+- `输出` 命中底部表格主数值时会记录 `FFLogs statistics primary table cell matched`，便于确认不再回退到时间序列接口。
+
 ## v0.14.14
 
 ### 修复

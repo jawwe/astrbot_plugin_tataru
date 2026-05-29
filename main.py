@@ -1719,6 +1719,20 @@ def parse_logs_statistics_chart_values(page: str, job: dict) -> dict | None:
     return stat
 
 
+def parse_logs_statistics_primary_cell(page: str) -> dict | None:
+    cells = re.findall(
+        r"<td\b(?=[^>]*\bmain-table-number\b)(?=[^>]*\bprimary\b)[^>]*>(.*?)</td>",
+        page,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for cell in cells:
+        text = fflogs_text_from_html(cell)
+        candidates = fflogs_decimal_candidates(text)
+        if candidates:
+            return {"dps": candidates[0]}
+    return None
+
+
 def parse_logs_statistics_summary_row(page: str, job: dict) -> dict | None:
     job_names = [name for name in [job.get("cn_name"), job.get("name")] if isinstance(name, str) and name]
     rows = re.findall(r"<tr\b[^>]*>.*?</tr>", page, flags=re.IGNORECASE | re.DOTALL)
@@ -1810,7 +1824,11 @@ async def fetch_logs_statistics_summary(query: LogsQuery, boss: dict, job: dict)
                 logger.info("FFLogs statistics chart values matched")
                 version_label = parse_logs_statistics_version_label(page)
                 return chart_stat, version_label or "网页默认"
-        parsed = parse_logs_statistics_summary_row(page, job)
+        parsed = parse_logs_statistics_primary_cell(page)
+        if parsed:
+            logger.info("FFLogs statistics primary table cell matched")
+        else:
+            parsed = parse_logs_statistics_summary_row(page, job)
         if not parsed:
             log_fflogs_statistics_page_diagnostics(page, job)
             return None
