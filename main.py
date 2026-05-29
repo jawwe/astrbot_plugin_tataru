@@ -1733,6 +1733,22 @@ def parse_logs_statistics_primary_cell(page: str) -> dict | None:
     return None
 
 
+def fflogs_debug_snippet(value: str, limit: int = 120) -> str:
+    text = fflogs_text_from_html(value)
+    return text[:limit]
+
+
+def fflogs_debug_td_samples(page: str, pattern: str, limit: int = 3) -> list[str]:
+    cells = re.findall(r"<td\b[^>]*>.*?</td>", page, flags=re.IGNORECASE | re.DOTALL)
+    samples = []
+    for cell in cells:
+        if re.search(pattern, cell, flags=re.IGNORECASE):
+            samples.append(fflogs_debug_snippet(cell))
+            if len(samples) >= limit:
+                break
+    return samples
+
+
 def parse_logs_statistics_summary_row(page: str, job: dict) -> dict | None:
     job_names = [name for name in [job.get("cn_name"), job.get("name")] if isinstance(name, str) and name]
     rows = re.findall(r"<tr\b[^>]*>.*?</tr>", page, flags=re.IGNORECASE | re.DOTALL)
@@ -1785,6 +1801,21 @@ def parse_logs_statistics_version_label(page: str) -> str | None:
 def log_fflogs_statistics_page_diagnostics(page: str, job: dict) -> None:
     decoded = decode_fflogs_page_text(page)
     text = fflogs_text_from_html(page)
+    primary_cells = re.findall(
+        r"<td\b(?=[^>]*\bmain-table-number\b)(?=[^>]*\bprimary\b)[^>]*>(.*?)</td>",
+        decoded,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    primary_values = []
+    for cell in primary_cells[:10]:
+        primary_values.extend(fflogs_decimal_candidates(fflogs_text_from_html(cell)))
+    job_decimal_candidates = []
+    for name in [job.get("cn_name"), job.get("name")]:
+        if not name:
+            continue
+        index = decoded.rfind(str(name))
+        if index >= 0:
+            job_decimal_candidates.extend(fflogs_decimal_candidates(decoded[index : index + 1200]))
     markers = {
         "cn_job": bool(job.get("cn_name") and job["cn_name"] in decoded),
         "en_job": bool(job.get("name") and job["name"] in decoded),
@@ -1793,8 +1824,16 @@ def log_fflogs_statistics_page_diagnostics(page: str, job: dict) -> None:
         "table_rows": bool(re.search(r"<tr\b", decoded, flags=re.IGNORECASE)),
         "data_push": "data.push" in decoded,
         "cloudflare": "Just a moment" in decoded or "Enable JavaScript and cookies" in decoded,
+        "td_count": len(re.findall(r"<td\b", decoded, flags=re.IGNORECASE)),
+        "primary_td_count": len(re.findall(r"<td\b[^>]*\bprimary\b", decoded, flags=re.IGNORECASE)),
+        "main_table_number_td_count": len(re.findall(r"<td\b[^>]*\bmain-table-number\b", decoded, flags=re.IGNORECASE)),
+        "primary_main_table_cell_count": len(primary_cells),
     }
     logger.info(f"FFLogs statistics page diagnostics: len={len(page)} markers={markers}")
+    logger.info(f"FFLogs statistics primary values sample: {primary_values[:8]}")
+    logger.info(f"FFLogs statistics job-window decimals sample: {job_decimal_candidates[:12]}")
+    logger.info(f"FFLogs statistics main-table-number td samples: {fflogs_debug_td_samples(decoded, r'main-table-number')}")
+    logger.info(f"FFLogs statistics primary td samples: {fflogs_debug_td_samples(decoded, r'\\bprimary\\b')}")
 
 
 async def fetch_logs_statistics_summary(query: LogsQuery, boss: dict, job: dict) -> tuple[dict, str] | None:
@@ -1909,6 +1948,7 @@ async def create_logs_text_crawl(query: LogsQuery, boss: dict, job: dict) -> str
         if summary_result:
             stat, region_info = summary_result
             return normalize_fflogs_result(stat, query, boss, job, region_info, "FFLogs statistics page")
+        return "FFLogs statistics 页面解析失败，已记录诊断日志，请检查插件日志中的 FFLogs statistics page diagnostics。"
 
     result = await fetch_logs_statistics_page(query, boss, job)
     if not result:
