@@ -668,8 +668,6 @@ def create_help_text() -> str:
 [输出 boss名 职业名 (国服) (rdps) (day2)] 查询FFLogs输出分段
 [logs 角色名 服务器名 (国服/国际服)] 查询角色FFLogs战绩
 [抽卡] 随机抽取一张FF14塔罗牌
-
-以下功能仍在迁移中：
 """
 
 
@@ -3363,7 +3361,7 @@ async def get_party_finder_texts(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "0.14.30",
+    "1.0.0",
     "https://github.com/jawwe/astrbot_plugin_tataru",
 )
 class TataruPlugin(Star):
@@ -3404,7 +3402,7 @@ class TataruPlugin(Star):
 
     @filter.command("帮帮忙")
     async def help(self, event: AstrMessageEvent):
-        """显示塔塔露当前已迁移的指令。"""
+        """显示塔塔露当前指令。"""
         yield event.plain_result(create_help_text())
 
     @filter.command("选门")

@@ -33,6 +33,6 @@
     "description": "文本转图片字体路径",
     "type": "string",
     "default": "",
-    "hint": "可选。用于价格、物品、房子、抽卡等文本转图片功能。留空时会自动尝试使用 Linux 系统自带中文字体，如 Noto Sans CJK、文泉驿等。"
+    "hint": "可选。用于价格、物品、房子、抽卡等文本转图片功能。推荐使用 SimHei.ttf；留空时会自动尝试使用 Linux 系统自带中文字体，如 Noto Sans CJK、文泉驿等。"
   }
 }
