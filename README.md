@@ -177,7 +177,7 @@ astrbot_plugin_tataru/
 
 - [AstrBot](https://github.com/Soulter/AstrBot)：插件运行框架。
 - [Soulter/helloworld](https://github.com/Soulter/helloworld)：AstrBot 插件结构参考模板。
-- [TataruBot2](https://github.com/jawwe/TataruBot2)：原始功能来源。
+- [TataruBot2](https://github.com/aaron-lii/TataruBot2)：原始功能来源。
 - [remote-party-finder](https://github.com/LittleNightmare/remote-party-finder)：招募板 API 数据源。
 - [XIVAPI v2](https://xivapi-v2.xivcdn.com/zh-cn/)：FF14 游戏数据查询。
 - [Garland Tools 国服站](https://garlandtools.cn/)：物品详情、来源和图标数据源。
