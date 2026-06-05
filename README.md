@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.1-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -87,7 +87,7 @@ https://github.com/jawwe/astrbot_plugin_tataru
 招募 红玉海 高难任务 战士 20
 ```
 
-支持四大区、具体服务器、职业、分类、关键词和数量筛选。数字参数表示返回数量，默认 `10`，最多 `40`。
+支持四大区、具体服务器、职业、分类、关键词和数量筛选。数字参数表示返回数量，默认 `10`，最多 `40`。返回结果渲染为竖排卡片图，每张图最多显示 `5` 条招募。
 
 ### 物品
 
@@ -144,6 +144,7 @@ logs 角色名 服务器名 国际服
 | `fflogs_client_secret` | 空 | FFLogs API Client Secret，用于获取 FFLogs OAuth token |
 | `use_global_fflogs` | `false` | `输出` 和 `logs` 默认查询国际服 FFLogs |
 | `font_path` | 空 | 文本转图片字体路径，留空时自动尝试 Linux 系统中文字体 |
+| `ffxiv_icon_font_path` | 空 | `招募` 卡片渲染 FFXIV 游戏内特殊图标字符时使用的本地图标字体路径 |
 
 ### 字体建议
 
@@ -152,6 +153,11 @@ logs 角色名 服务器名 国际服
 - 下载地址：[SimHei.ttf](https://github.com/StellarCN/scp_zh/blob/master/fonts/SimHei.ttf)
 - 配置方式：在 AstrBot 插件配置页的 `font_path` 填写字体文件绝对路径。
 - 留空时：插件会自动尝试 Linux 常见字体，如 Noto Sans CJK、文泉驿等。
+
+`招募` 卡片内如果出现游戏内特殊图标字符，可下载 Lodestone 图标字体到本地，并在 `ffxiv_icon_font_path` 填写绝对路径：
+
+- 推荐字体：[FFXIV_Lodestone_SSF.ttf](https://img.finalfantasyxiv.com/lds/pc/global/fonts/FFXIV_Lodestone_SSF.ttf)
+- 备用格式：[FFXIV_Lodestone_SSF.woff](https://img.finalfantasyxiv.com/lds/pc/global/fonts/FFXIV_Lodestone_SSF.woff)
 
 ### Cookie 必填提醒
 **微博Cookie为必填项**，插件虽然允许在未配置 Cookie 时启动，但**必须配置 Cookie 后才能正常抓取数据**。请务必按照下方步骤获取并配置Cookie。

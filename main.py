@@ -33,7 +33,12 @@ DEFAULT_FONT_PATHS = [
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     "/usr/share/fonts/truetype/arphic/uming.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/msyh.ttc",
 ]
+FFXIV_ICON_FONT_START = 0xE020
+FFXIV_ICON_FONT_END = 0xE0DB
+PARTY_FINDER_CARDS_PER_IMAGE = 5
 DEFAULT_CN_CALENDAR_PATH = DATA_DIR / "calendar.ics"
 CALENDAR_SOURCES = {
     "国服": {
@@ -632,6 +637,306 @@ def text_to_image(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path, format="JPEG")
+
+
+def load_render_font(font_path: str | None, font_size: int):
+    resolved_font = resolve_text_font(font_path)
+    if resolved_font:
+        try:
+            return ImageFont.truetype(resolved_font, size=font_size)
+        except OSError as exc:
+            logger.warning(f"Configured font load failed: {resolved_font}: {exc}")
+    return ImageFont.load_default()
+
+
+def load_optional_font(font_path: str | None, font_size: int):
+    if not font_path:
+        return None
+    font_file = Path(font_path).expanduser()
+    if not font_file.exists() or not font_file.is_file():
+        logger.warning(f"FFXIV icon font path is not a file: {font_path}")
+        return None
+    try:
+        return ImageFont.truetype(str(font_file), size=font_size)
+    except OSError as exc:
+        logger.warning(f"FFXIV icon font load failed: {font_path}: {exc}")
+        return None
+
+
+def is_ffxiv_icon_char(char: str) -> bool:
+    return len(char) == 1 and FFXIV_ICON_FONT_START <= ord(char) <= FFXIV_ICON_FONT_END
+
+
+def mixed_char_font(char: str, text_font, icon_font):
+    if icon_font and is_ffxiv_icon_char(char):
+        return icon_font
+    return text_font
+
+
+def text_bbox_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
+    if not text:
+        return 0, 0
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def mixed_text_width(draw: ImageDraw.ImageDraw, text: str, text_font, icon_font) -> int:
+    return sum(text_bbox_size(draw, char, mixed_char_font(char, text_font, icon_font))[0] for char in text)
+
+
+def draw_mixed_text(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    text_font,
+    icon_font,
+    fill: tuple[int, int, int],
+) -> int:
+    x, y = xy
+    for char in text:
+        font = mixed_char_font(char, text_font, icon_font)
+        draw.text((x, y), char, font=font, fill=fill)
+        x += text_bbox_size(draw, char, font)[0]
+    return x
+
+
+def wrap_mixed_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    max_width: int,
+    text_font,
+    icon_font,
+    max_lines: int,
+) -> list[str]:
+    text = re.sub(r"[ \t\r\f\v]+", " ", text or "").strip()
+    if not text:
+        return []
+
+    lines: list[str] = []
+    line = ""
+    truncated = False
+    for char in text:
+        if char == "\n":
+            lines.append(line)
+            line = ""
+        else:
+            candidate = line + char
+            if line and mixed_text_width(draw, candidate, text_font, icon_font) > max_width:
+                lines.append(line)
+                line = char
+            else:
+                line = candidate
+        if len(lines) >= max_lines:
+            truncated = bool(line) or char != text[-1]
+            line = ""
+            break
+    if line and len(lines) < max_lines:
+        lines.append(line)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        truncated = True
+    if truncated and lines:
+        while lines[-1] and mixed_text_width(draw, lines[-1] + "...", text_font, icon_font) > max_width:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] += "..."
+    return lines
+
+
+def draw_pill(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font,
+    fill: tuple[int, int, int],
+    text_fill: tuple[int, int, int],
+    padding_x: int = 12,
+    padding_y: int = 5,
+) -> tuple[int, int, int, int]:
+    x, y = xy
+    text_w, text_h = text_bbox_size(draw, text, font)
+    rect = (x, y, x + text_w + padding_x * 2, y + text_h + padding_y * 2)
+    draw.rounded_rectangle(rect, radius=7, fill=fill)
+    draw.text((x + padding_x, y + padding_y - 1), text, font=font, fill=text_fill)
+    return rect
+
+
+def format_party_card_time_left(seconds_value) -> str:
+    try:
+        seconds = int(float(seconds_value))
+    except (TypeError, ValueError):
+        return party_optional_text(seconds_value)
+    if seconds <= 0:
+        return "已过期"
+    minutes = seconds // 60
+    rest_seconds = seconds % 60
+    if minutes < 60:
+        return f"{minutes}分钟{rest_seconds:02d}秒"
+    hours = minutes // 60
+    rest_minutes = minutes % 60
+    if rest_minutes:
+        return f"{hours}小时{rest_minutes}分钟"
+    return f"{hours}小时"
+
+
+def get_party_category_label(listing: dict) -> str:
+    category_now = party_optional_text(listing.get("category"))
+    category_id = listing.get("category_id")
+    if not category_now and category_id is not None:
+        try:
+            return PARTY_CATEGORY_ID_LABELS.get(int(category_id), f"分类ID {category_id}")
+        except (TypeError, ValueError):
+            return f"分类ID {category_id}"
+    return PARTY_CATEGORY_LABELS.get(category_now, category_now or "未知分类")
+
+
+def get_party_people_text(listing: dict) -> str:
+    total_text = party_optional_text(listing.get("total_text") or listing.get("total"))
+    if total_text:
+        return total_text
+
+    filled = listing.get("slots_filled")
+    available = listing.get("slots_available")
+    if filled is not None and available is not None:
+        try:
+            return f"{int(filled)}/{int(filled) + int(available)}"
+        except (TypeError, ValueError):
+            return f"{filled}/{available}"
+    return ""
+
+
+def normalize_party_finder_entry(index: int, listing: dict) -> dict:
+    home_world = party_optional_text(listing.get("home_world") or listing.get("world") or listing.get("created_world"))
+    created_world = party_optional_text(listing.get("created_world") or home_world)
+    if not home_world:
+        world_id = listing.get("home_world_id") or listing.get("created_world_id")
+        home_world = f"世界ID {world_id}" if world_id else "未知世界"
+    if not created_world:
+        world_id = listing.get("created_world_id") or listing.get("home_world_id")
+        created_world = f"世界ID {world_id}" if world_id else home_world
+
+    datacenter = party_optional_text(listing.get("datacenter") or listing.get("data_centre") or listing.get("data_center"))
+    item_level = party_optional_text(listing.get("min_item_level"))
+    duty = party_optional_text(listing.get("duty")) or "无"
+    if item_level and item_level != "0":
+        duty = f"{duty}  IL {item_level}"
+
+    return {
+        "index": index,
+        "creator": party_optional_text(listing.get("name") or listing.get("player_name")) or "未知",
+        "home_world": home_world,
+        "created_world": created_world,
+        "datacenter": datacenter or "未知大区",
+        "category": get_party_category_label(listing),
+        "duty": duty,
+        "description": party_optional_text(listing.get("description")) or "无招募说明",
+        "people": get_party_people_text(listing) or "?/?",
+        "time_left": format_party_card_time_left(listing.get("time_left") or listing.get("time_left_seconds")),
+        "updated": format_party_updated_at(party_optional_text(listing.get("updated_at"))),
+        "is_cross_world": bool(created_world and home_world and created_world != home_world),
+    }
+
+
+def draw_party_card_row(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    label: str,
+    value: str,
+    label_font,
+    value_font,
+    icon_font,
+    badge: str | None = None,
+) -> None:
+    label_color = (88, 88, 94)
+    value_color = (45, 45, 52)
+    draw_mixed_text(draw, (x, y), label, label_font, icon_font, label_color)
+    label_w = mixed_text_width(draw, label, label_font, icon_font)
+    end_x = draw_mixed_text(draw, (x + label_w + 8, y), value, value_font, icon_font, value_color)
+    if badge:
+        draw_pill(draw, (end_x + 14, y - 3), badge, value_font, (242, 114, 57), (255, 255, 255), 9, 4)
+
+
+def render_party_finder_cards(
+    entries: list[dict],
+    output_path: Path,
+    font_path: str | None = None,
+    icon_font_path: str | None = None,
+) -> None:
+    width = 920
+    card_x = 24
+    card_w = width - card_x * 2
+    card_h = 390
+    gap = 20
+    padding_y = 24
+    height = padding_y * 2 + len(entries) * card_h + max(0, len(entries) - 1) * gap
+
+    image = Image.new("RGB", (width, height), (246, 247, 250))
+    draw = ImageDraw.Draw(image)
+    title_font = load_render_font(font_path, 30)
+    label_font = load_render_font(font_path, 23)
+    body_font = load_render_font(font_path, 23)
+    small_font = load_render_font(font_path, 18)
+    people_font = load_render_font(font_path, 36)
+    icon_font = load_optional_font(icon_font_path, 23)
+
+    for card_index, entry in enumerate(entries):
+        y = padding_y + card_index * (card_h + gap)
+        shadow = (card_x + 4, y + 6, card_x + card_w + 4, y + card_h + 6)
+        card = (card_x, y, card_x + card_w, y + card_h)
+        draw.rounded_rectangle(shadow, radius=14, fill=(224, 226, 232))
+        draw.rounded_rectangle(card, radius=14, fill=(255, 255, 255))
+        draw.rounded_rectangle((card_x, y, card_x + card_w, y + 66), radius=14, fill=(91, 96, 216))
+        draw.rectangle((card_x, y + 48, card_x + card_w, y + 66), fill=(91, 96, 216))
+
+        draw_mixed_text(draw, (card_x + 24, y + 18), entry["creator"], title_font, icon_font, (255, 255, 255))
+        time_text = entry.get("time_left") or ""
+        if time_text:
+            badge_w = text_bbox_size(draw, time_text, body_font)[0] + 30
+            draw_pill(
+                draw,
+                (card_x + card_w - badge_w - 20, y + 14),
+                time_text,
+                body_font,
+                (125, 130, 226),
+                (255, 255, 255),
+                14,
+                6,
+            )
+
+        body_x = card_x + 24
+        row_y = y + 96
+        row_gap = 32
+        draw_party_card_row(draw, body_x, row_y, "所属服务器：", entry["home_world"], label_font, body_font, icon_font)
+        draw_party_card_row(
+            draw,
+            body_x,
+            row_y + row_gap,
+            "创建服务器：",
+            entry["created_world"],
+            label_font,
+            body_font,
+            icon_font,
+            "跨服招募" if entry.get("is_cross_world") else None,
+        )
+        draw_party_card_row(draw, body_x, row_y + row_gap * 2, "大区：", entry["datacenter"], label_font, body_font, icon_font)
+        draw_party_card_row(draw, body_x, row_y + row_gap * 3, "类别：", entry["category"], label_font, body_font, icon_font)
+        draw_party_card_row(draw, body_x, row_y + row_gap * 4, "任务：", entry["duty"], label_font, body_font, icon_font)
+
+        people_text = entry.get("people") or "?/?"
+        people_x = card_x + card_w - 124
+        draw.text((people_x + 10, y + 148), people_text, font=people_font, fill=(42, 42, 48))
+        draw.text((people_x + 28, y + 193), "人数", font=small_font, fill=(88, 88, 94))
+
+        divider_y = y + 254
+        draw.line((card_x + 24, divider_y, card_x + card_w - 24, divider_y), fill=(226, 226, 230), width=1)
+        draw.text((body_x, y + 272), "招募说明：", font=label_font, fill=(91, 96, 216))
+        desc_lines = wrap_mixed_text(draw, entry.get("description") or "", card_w - 48, body_font, icon_font, 2)
+        for line_index, line in enumerate(desc_lines):
+            draw_mixed_text(draw, (body_x, y + 306 + line_index * 28), line, body_font, icon_font, (102, 102, 108))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path, format="JPEG", quality=90)
 
 
 def load_tarot() -> dict:
@@ -3142,14 +3447,14 @@ def extract_party_finder_listings(payload) -> list[dict] | None:
     return None
 
 
-async def get_party_finder_texts_api_v1(
+async def get_party_finder_entries_api_v1(
     data_centre: str | None = None,
     world_name: str | None = None,
     category: str | None = None,
     search_text: str | None = None,
     job_ids: list[int] | None = None,
     limit: int = 10,
-) -> list[str] | None:
+) -> list[dict] | None:
     params = {
         "page": 1,
         "per_page": max(1, min(limit, 100)),
@@ -3169,22 +3474,22 @@ async def get_party_finder_texts_api_v1(
     if listings is None:
         return None
 
-    text_list = []
+    entries = []
     for index, listing in enumerate(listings[:limit], start=1):
         if not isinstance(listing, dict):
             continue
-        text_list.append(format_party_finder_api_entry(index, listing))
-    return text_list
+        entries.append(normalize_party_finder_entry(index, listing))
+    return entries
 
 
-async def get_party_finder_texts_api_v2(
+async def get_party_finder_entries_api_v2(
     data_centre: str | None = None,
     world_id: int | None = None,
     category: str | None = None,
     search_text: str | None = None,
     job_ids: list[int] | None = None,
     limit: int = 10,
-) -> list[str] | None:
+) -> list[dict] | None:
     fetch_limit = 100 if search_text else max(1, min(limit, 100))
     params = {
         "page": 1,
@@ -3236,20 +3541,17 @@ async def get_party_finder_texts_api_v2(
         for listing in enriched_listings
         if party_finder_matches_search(listing, search_text)
     ][:limit]
-    return [
-        format_party_finder_api_entry(index, listing)
-        for index, listing in enumerate(filtered_listings, start=1)
-    ]
+    return [normalize_party_finder_entry(index, listing) for index, listing in enumerate(filtered_listings, start=1)]
 
 
-async def get_party_finder_texts_html(
+async def get_party_finder_entries_html(
     data_centre: str | None = None,
     world_name: str | None = None,
     category: str | None = None,
     search_text: str | None = None,
     job_ids: list[int] | None = None,
     limit: int = 10,
-) -> list[str]:
+) -> list[dict]:
     if job_ids:
         return []
     all_info = await aiohttp_get(PARTY_FINDER_URL, res_type="text")
@@ -3263,7 +3565,7 @@ async def get_party_finder_texts_html(
     meta_list = re.findall(r'class="text">.*?</span>', all_info)
     total_list = re.findall(r'<div class="total">.*?</div>', all_info)
 
-    text_list = []
+    entries = []
     index_now = 1
     entry_count = min(
         len(category_list),
@@ -3297,20 +3599,30 @@ async def get_party_finder_texts_html(
             search_area = f"{duty_now} {description_now} {creator_now} {world_now}".lower()
             if search_text.lower() not in search_area:
                 continue
-        category_label = PARTY_CATEGORY_LABELS.get(category_now, category_now)
-
-        text_now = f"{index_now:02d}. [{category_label}] {duty_now}\n"
-        text_now += f"    {truncate_text(description_now, 86)}\n"
-        text_now += f"    {creator_now} | {world_now} | {total_now} | {expires_now} | {updated_now}\n"
-
+        entries.append(
+            normalize_party_finder_entry(
+                index_now,
+                {
+                    "category": category_now,
+                    "duty": duty_now,
+                    "description": description_now,
+                    "name": creator_now,
+                    "created_world": world_now,
+                    "home_world": world_now,
+                    "datacenter": data_centre_now,
+                    "total_text": total_now,
+                    "time_left": expires_now,
+                    "updated_at": updated_now,
+                },
+            )
+        )
         index_now += 1
-        text_list.append(text_now)
-        if len(text_list) >= limit:
+        if len(entries) >= limit:
             break
-    return text_list
+    return entries
 
 
-async def get_party_finder_texts(
+async def get_party_finder_entries(
     data_centre: str | None = None,
     world_name: str | None = None,
     world_id: int | None = None,
@@ -3318,9 +3630,9 @@ async def get_party_finder_texts(
     search_text: str | None = None,
     job_ids: list[int] | None = None,
     limit: int = 10,
-) -> list[str]:
+) -> list[dict]:
     try:
-        v2_texts = await get_party_finder_texts_api_v2(
+        v2_entries = await get_party_finder_entries_api_v2(
             data_centre,
             world_id=world_id,
             category=category,
@@ -3328,13 +3640,13 @@ async def get_party_finder_texts(
             job_ids=job_ids,
             limit=limit,
         )
-        if v2_texts is not None:
-            return v2_texts
+        if v2_entries is not None:
+            return v2_entries
     except Exception as exc:
         logger.warning(f"招募板 API v2 获取失败，尝试 API v1: {exc}")
 
     try:
-        api_texts = await get_party_finder_texts_api_v1(
+        api_entries = await get_party_finder_entries_api_v1(
             data_centre,
             world_name=world_name,
             category=category,
@@ -3342,12 +3654,12 @@ async def get_party_finder_texts(
             job_ids=job_ids,
             limit=limit,
         )
-        if api_texts is not None:
-            return api_texts
+        if api_entries is not None:
+            return api_entries
     except Exception as exc:
         logger.warning(f"招募板 API v1 获取失败，尝试 HTML 兜底: {exc}")
 
-    return await get_party_finder_texts_html(
+    return await get_party_finder_entries_html(
         data_centre,
         world_name=world_name,
         category=category,
@@ -3361,7 +3673,7 @@ async def get_party_finder_texts(
     "astrbot_plugin_tataru",
     "aaron-li / Codex",
     "FF14 塔塔露 AstrBot 插件",
-    "1.0.0",
+    "1.0.1",
     "https://github.com/jawwe/astrbot_plugin_tataru",
 )
 class TataruPlugin(Star):
@@ -3396,6 +3708,9 @@ class TataruPlugin(Star):
 
     def configured_font_path(self) -> str:
         return str(self.config.get("font_path", "") or "").strip()
+
+    def ffxiv_icon_font_path(self) -> str:
+        return str(self.config.get("ffxiv_icon_font_path", "") or "").strip()
 
     def render_text_image(self, text: str, output_path: Path, width_now: int = 20) -> None:
         text_to_image(text, output_path, width_now=width_now, font_path=self.configured_font_path())
@@ -3462,7 +3777,7 @@ class TataruPlugin(Star):
         scope_label = world["name"] if world else (data_centre or "全服")
 
         try:
-            text_list = await get_party_finder_texts(
+            entries = await get_party_finder_entries(
                 data_centre,
                 world_name=world["name"] if world else None,
                 world_id=world["id"] if world else None,
@@ -3476,7 +3791,7 @@ class TataruPlugin(Star):
             yield event.plain_result("招募板获取失败，请稍后再试")
             return
 
-        if not text_list:
+        if not entries:
             category_hint = f"「{PARTY_CATEGORY_LABELS.get(query.category, query.category)}」" if query.category else ""
             search_hint = f"包含「{search_text}」的" if search_text else ""
             job_hint = "指定职业的" if query.job_ids else ""
@@ -3484,15 +3799,14 @@ class TataruPlugin(Star):
             return
 
         image_components = []
-        for index in range(0, len(text_list), 10):
-            category_label = PARTY_CATEGORY_LABELS.get(query.category, "全部") if query.category else "全部"
-            search_label = search_text or "无"
-            job_label = "有" if query.job_ids else "无"
-            final_text = f"【{scope_label}招募板】分类：{category_label}  搜索：{search_label}  职业：{job_label}  数量：{len(text_list)}\n"
-            final_text += "────────────────────────\n"
-            final_text += "\n".join(text_list[index:index + 10])
-            image_path = self.cache_dir / f"party_finder_{index // 10}.jpg"
-            self.render_text_image(final_text, image_path, width_now=42)
+        for index in range(0, len(entries), PARTY_FINDER_CARDS_PER_IMAGE):
+            image_path = self.cache_dir / f"party_finder_{index // PARTY_FINDER_CARDS_PER_IMAGE}.jpg"
+            render_party_finder_cards(
+                entries[index:index + PARTY_FINDER_CARDS_PER_IMAGE],
+                image_path,
+                font_path=self.configured_font_path(),
+                icon_font_path=self.ffxiv_icon_font_path(),
+            )
             image_components.append(Comp.Image.fromFileSystem(str(image_path)))
 
         yield event.chain_result(image_components)
