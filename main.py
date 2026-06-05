@@ -1358,6 +1358,16 @@ def is_pinned_weibo_card(card: dict, mblog: dict) -> bool:
     )
 
 
+def weibo_cookie_value(cookie: str | None, name: str) -> str:
+    if not cookie:
+        return ""
+    for part in cookie.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value.strip()
+    return ""
+
+
 def get_weibo_headers(cookie: str | None = None, uid: str = WEIBO_UID) -> dict:
     headers = {
         "User-Agent": (
@@ -1366,12 +1376,16 @@ def get_weibo_headers(cookie: str | None = None, uid: str = WEIBO_UID) -> dict:
             "Mobile/15E148 Safari/604.1"
         ),
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
         "Referer": f"{WEIBO_MOBILE_BASE}/u/{uid}",
         "MWeibo-Pwa": "1",
         "X-Requested-With": "XMLHttpRequest",
     }
     if cookie:
         headers["Cookie"] = cookie
+        xsrf_token = weibo_cookie_value(cookie, "XSRF-TOKEN")
+        if xsrf_token:
+            headers["X-XSRF-TOKEN"] = xsrf_token
     return headers
 
 
@@ -1382,11 +1396,15 @@ def get_weibo_web_headers(cookie: str | None = None, uid: str = WEIBO_UID) -> di
             "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
         ),
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
         "Referer": f"{WEIBO_WEB_BASE}/u/{uid}",
         "X-Requested-With": "XMLHttpRequest",
     }
     if cookie:
         headers["Cookie"] = cookie
+        xsrf_token = weibo_cookie_value(cookie, "XSRF-TOKEN")
+        if xsrf_token:
+            headers["X-XSRF-TOKEN"] = xsrf_token
     return headers
 
 
@@ -1410,7 +1428,10 @@ async def fetch_weibo_cards(
                 return []
 
     if not isinstance(payload, dict) or payload.get("ok") != 1:
-        logger.warning("微博接口返回状态异常")
+        logger.warning(
+            f"微博接口返回状态异常: ok={payload.get('ok') if isinstance(payload, dict) else None} "
+            f"msg={payload.get('msg') if isinstance(payload, dict) else None}"
+        )
         return []
     cards = payload.get("data", {}).get("cards")
     return cards if isinstance(cards, list) else []
@@ -1436,7 +1457,13 @@ async def fetch_weibo_web_statuses(
                 return []
 
     if not isinstance(payload, dict) or payload.get("ok") != 1:
-        logger.warning("微博网页端接口返回状态异常")
+        if isinstance(payload, dict) and "login.php" in str(payload.get("url", "")):
+            logger.warning("微博网页端接口需要登录，Cookie 可能未配置或已失效")
+        else:
+            logger.warning(
+                f"微博网页端接口返回状态异常: ok={payload.get('ok') if isinstance(payload, dict) else None} "
+                f"msg={payload.get('msg') if isinstance(payload, dict) else None}"
+            )
         return []
     data = payload.get("data", {})
     if not isinstance(data, dict):
@@ -1522,7 +1549,9 @@ async def get_ff_weibo_text(cookie: str | None = None, limit: int = 5) -> str:
                 break
 
     if not statuses:
-        return "没有获取到最新微博，可能是微博接口结构变化或需要配置微博 Cookie。"
+        if cookie:
+            return "没有获取到最新微博，可能是微博 Cookie 已失效或接口结构变化，请在插件设置里更新 weibo_cookie。"
+        return "没有获取到最新微博，微博接口需要配置有效 Cookie，请在插件设置里填写 weibo_cookie。"
     return "\n".join(
         format_weibo_status(index, item)
         for index, item in enumerate(statuses[:limit], start=1)
