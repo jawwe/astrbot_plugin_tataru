@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.5-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.11-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -138,6 +138,12 @@ logs 角色名 服务器名 国际服
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
+| `debug_mode` | `false` | 输出插件指令、缓存和联网请求调试日志；Cookie、Token、密码等敏感字段会自动脱敏 |
+| `proxy_enabled` | `false` | 开启后插件全部联网请求通过 HTTP 代理发送；关闭时保持直连 |
+| `proxy_host` | 空 | HTTP 代理 IP 或主机名，不填写协议、端口或路径 |
+| `proxy_port` | `0` | HTTP 代理端口，启用代理时必须为 `1-65535` |
+| `proxy_username` | 空 | 可选的 HTTP 代理认证用户名，需与代理密码同时填写 |
+| `proxy_password` | 空 | 可选的 HTTP 代理认证密码，插件日志不会输出该值 |
 | `use_global_calendar` | `false` | `日历` 命令无参数时默认查询国际服日历 |
 | `weibo_cookie` | 空 | 微博 Cookie，可提高 `看看微博` 稳定性 |
 | `fflogs_client_id` | 空 | FFLogs API Client ID，用于 `输出` 动态匹配和 `logs` 查询 |

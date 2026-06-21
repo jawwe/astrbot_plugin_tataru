@@ -1,0 +1,35 @@
+name: AstrBot Compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev, main]
+  schedule:
+    - cron: "37 4 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  import-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: astrbotdevs/astrbot
+          ref: master
+          path: astrbot
+      - uses: astral-sh/setup-uv@v5
+      - name: Create AstrBot environment
+        working-directory: astrbot
+        run: uv sync --no-dev
+      - name: Install plugin runtime dependencies
+        working-directory: astrbot
+        run: uv run python -m pip install -r "$GITHUB_WORKSPACE/requirements.txt"
+      - name: Import plugin against AstrBot
+        working-directory: astrbot
+        run: uv run python "$GITHUB_WORKSPACE/scripts/astrbot_import_smoke.py"

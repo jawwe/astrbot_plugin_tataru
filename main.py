@@ -2,12 +2,15 @@ import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
 from email.utils import parsedate_to_datetime
+from functools import wraps
 import html
+import itertools
 import json
 import random
 import re
+import time
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 from astrbot.api import logger
@@ -16,7 +19,6 @@ import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, register
 from icalendar import Calendar
 from PIL import Image, ImageDraw, ImageFont
-
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 PLUGIN_NAME = "astrbot_plugin_tataru"
@@ -40,10 +42,202 @@ PLUGIN_USER_AGENT = (
 )
 BROWSER_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Edge/125.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
 ]
+
+
+@dataclass(frozen=True)
+class NetworkSettings:
+    debug_mode: bool = False
+    proxy_enabled: bool = False
+    proxy_url: str | None = None
+    proxy_auth: aiohttp.BasicAuth | None = None
+    proxy_error: str | None = None
+
+
+@dataclass(frozen=True)
+class HttpResponse:
+    status: int
+    payload: object | None = None
+
+
+class ProxyConfigurationError(RuntimeError):
+    """Raised when proxy mode is enabled with incomplete settings."""
+
+
+NETWORK_SETTINGS = NetworkSettings()
+HTTP_REQUEST_COUNTER = itertools.count(1)
+SENSITIVE_DEBUG_KEYWORDS = (
+    "token",
+    "cookie",
+    "authorization",
+    "secret",
+    "password",
+    "credential",
+    "api_key",
+    "apikey",
+    "proxy_auth",
+)
+
+
+def is_sensitive_debug_key(key: str) -> bool:
+    normalized_key = key.lower().replace("-", "_")
+    return any(keyword in normalized_key for keyword in SENSITIVE_DEBUG_KEYWORDS)
+
+
+def mask_debug_secret(value: object) -> str:
+    text = str(value or "")
+    if len(text) <= 4:
+        return "*" * max(4, len(text))
+    return text[:2] + "*" * (len(text) - 4) + text[-2:]
+
+
+def sanitize_debug_url(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        if not parsed.query:
+            return url
+        query = urlencode(
+            [
+                (
+                    key,
+                    mask_debug_secret(value) if is_sensitive_debug_key(key) else value,
+                )
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            ],
+            doseq=True,
+            safe="*",
+        )
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment)
+        )
+    except Exception:
+        return "<invalid-url>"
+
+
+def sanitize_debug_value(value: object, key: str = "") -> object:
+    if is_sensitive_debug_key(key):
+        return mask_debug_secret(value)
+    if key.lower() == "url" and isinstance(value, str):
+        return sanitize_debug_url(value)
+    if isinstance(value, dict):
+        return {
+            str(item_key): sanitize_debug_value(item_value, str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_debug_value(item) for item in value]
+    return value
+
+
+def debug_log(event: str, *, proxy_used: bool = False, **fields: object) -> None:
+    if not NETWORK_SETTINGS.debug_mode:
+        return
+    prefix = "[Tataru Debug]"
+    if proxy_used:
+        prefix += " [Proxy]"
+    details = " ".join(
+        f"{key}={sanitize_debug_value(value, key)!r}" for key, value in fields.items()
+    )
+    logger.info(f"{prefix} event={event}" + (f" {details}" if details else ""))
+
+
+def configure_network_settings(config: dict | None) -> None:
+    global NETWORK_SETTINGS
+
+    config = config or {}
+    debug_mode = bool(config.get("debug_mode", False))
+    proxy_enabled = bool(config.get("proxy_enabled", False))
+    if not proxy_enabled:
+        NETWORK_SETTINGS = NetworkSettings(debug_mode=debug_mode)
+        debug_log("proxy.configuration", enabled=False)
+        return
+
+    host = str(config.get("proxy_host", "") or "").strip()
+    username = str(config.get("proxy_username", "") or "").strip()
+    password = str(config.get("proxy_password", "") or "")
+    try:
+        port = int(config.get("proxy_port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+
+    error = None
+    if not host:
+        error = "代理已启用，但未填写代理地址"
+    elif "://" in host or "/" in host:
+        error = "代理地址仅填写 IP 或主机名，不要包含协议或路径"
+    elif not 1 <= port <= 65535:
+        error = "代理端口必须在 1 到 65535 之间"
+    elif bool(username) != bool(password):
+        error = "代理用户名和密码需要同时填写或同时留空"
+
+    if error:
+        NETWORK_SETTINGS = NetworkSettings(
+            debug_mode=debug_mode,
+            proxy_enabled=True,
+            proxy_error=error,
+        )
+        logger.warning(f"[Proxy] {error}")
+        debug_log(
+            "proxy.configuration", proxy_used=True, enabled=True, status="invalid"
+        )
+        return
+
+    proxy_host = host.strip("[]")
+    if ":" in proxy_host:
+        proxy_host = f"[{proxy_host}]"
+    NETWORK_SETTINGS = NetworkSettings(
+        debug_mode=debug_mode,
+        proxy_enabled=True,
+        proxy_url=f"http://{proxy_host}:{port}",
+        proxy_auth=aiohttp.BasicAuth(username, password) if username else None,
+    )
+    debug_log(
+        "proxy.configuration",
+        proxy_used=True,
+        enabled=True,
+        host=host,
+        port=port,
+        authentication=bool(username),
+    )
+
+
+def proxy_request_options() -> dict:
+    if not NETWORK_SETTINGS.proxy_enabled:
+        return {}
+    if NETWORK_SETTINGS.proxy_error:
+        raise ProxyConfigurationError(NETWORK_SETTINGS.proxy_error)
+    options = {"proxy": NETWORK_SETTINGS.proxy_url}
+    if NETWORK_SETTINGS.proxy_auth:
+        options["proxy_auth"] = NETWORK_SETTINGS.proxy_auth
+    return options
+
+
+def debug_command(command_name: str):
+    """Log command lifecycle events when plugin debug mode is enabled."""
+
+    def decorator(handler):
+        @wraps(handler)
+        async def wrapper(self, *args, **kwargs):
+            debug_log("command.start", command=command_name)
+            try:
+                async for result in handler(self, *args, **kwargs):
+                    yield result
+            except Exception as exc:
+                debug_log(
+                    "command.error",
+                    command=command_name,
+                    error_type=type(exc).__name__,
+                )
+                raise
+            finally:
+                debug_log("command.finish", command=command_name)
+
+        return wrapper
+
+    return decorator
+
+
 DATA_DIR = PLUGIN_DIR / "data"
 TAROT_DIR = DATA_DIR / "TarotImages"
 TAROT_JSON = TAROT_DIR / "ff14_tarot.json"
@@ -684,28 +878,107 @@ async def aiohttp_get(
     headers: dict | None = None,
     use_api_user_agent: bool = False,
 ):
+    result = await aiohttp_request(
+        "GET",
+        url,
+        res_type=res_type,
+        timeout_seconds=timeout_seconds,
+        headers=headers,
+        use_api_user_agent=use_api_user_agent,
+    )
+    return result.payload if result.status == 200 else None
+
+
+async def aiohttp_request(
+    method: str,
+    url: str,
+    *,
+    res_type: str = "json",
+    timeout_seconds: int = 15,
+    headers: dict | None = None,
+    use_api_user_agent: bool = False,
+    data: dict | None = None,
+    json_data: dict | None = None,
+    auth: aiohttp.BasicAuth | None = None,
+) -> HttpResponse:
     request_headers = (
         api_request_headers(headers)
         if use_api_user_agent
         else browser_request_headers(headers)
     )
-
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=request_headers
-    ) as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                return None
-            if res_type == "bytes":
-                return await response.read()
-            if res_type == "text":
-                return await response.text()
-            try:
-                return await response.json(content_type=None)
-            except Exception as exc:
-                logger.warning(f"JSON响应解析失败: {url}, {exc}")
-                return None
+    request_options = proxy_request_options()
+    proxy_used = bool(request_options)
+    request_id = next(HTTP_REQUEST_COUNTER)
+    start_time = time.monotonic()
+    debug_log(
+        "http.request.start",
+        proxy_used=proxy_used,
+        request_id=request_id,
+        method=method.upper(),
+        url=url,
+        timeout_seconds=timeout_seconds,
+        header_names=sorted(request_headers),
+        has_body=bool(data or json_data),
+        has_auth=auth is not None,
+    )
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout, headers=request_headers
+        ) as session:
+            async with session.request(
+                method,
+                url,
+                data=data,
+                json=json_data,
+                auth=auth,
+                **request_options,
+            ) as response:
+                payload = None
+                if response.status == 200:
+                    if res_type == "bytes":
+                        payload = await response.read()
+                    elif res_type == "text":
+                        payload = await response.text()
+                    else:
+                        try:
+                            payload = await response.json(content_type=None)
+                        except Exception as exc:
+                            logger.warning(
+                                f"JSON响应解析失败: {sanitize_debug_url(url)}, {exc}"
+                            )
+                            debug_log(
+                                "http.response.parse_error",
+                                proxy_used=proxy_used,
+                                request_id=request_id,
+                                error_type=type(exc).__name__,
+                            )
+                debug_log(
+                    "http.request.finish",
+                    proxy_used=proxy_used,
+                    request_id=request_id,
+                    status=response.status,
+                    elapsed_ms=round((time.monotonic() - start_time) * 1000),
+                    content_length=response.content_length,
+                )
+                return HttpResponse(response.status, payload)
+    except Exception as exc:
+        debug_log(
+            "http.request.error",
+            proxy_used=proxy_used,
+            request_id=request_id,
+            error_type=type(exc).__name__,
+            elapsed_ms=round((time.monotonic() - start_time) * 1000),
+        )
+        raise
+
+
+async def safe_aiohttp_get(url: str, context: str, **kwargs):
+    try:
+        return await aiohttp_get(url, **kwargs)
+    except Exception as exc:
+        logger.warning(f"{context}请求失败: {exc}")
+        return None
 
 
 def random_left_right() -> str:
@@ -1433,9 +1706,9 @@ def weibo_cookie_value(cookie: str | None, name: str) -> str:
 def get_weibo_headers(cookie: str | None = None, uid: str = WEIBO_UID) -> dict:
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
-            "Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 26_5_1 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "CriOS/150.0.7871.34 Mobile/15E148 Safari/604.1"
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
@@ -1455,7 +1728,7 @@ def get_weibo_web_headers(cookie: str | None = None, uid: str = WEIBO_UID) -> di
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
@@ -1475,19 +1748,18 @@ async def fetch_weibo_cards(
 ) -> list[dict]:
     params = urlencode({"type": "uid", "value": uid, "containerid": f"107603{uid}"})
     url = f"{WEIBO_API_BASE}?{params}"
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=get_weibo_headers(cookie, uid)
-    ) as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                logger.warning(f"微博接口请求失败，状态码：{response.status}")
-                return []
-            try:
-                payload = await response.json(content_type=None)
-            except Exception as exc:
-                logger.warning(f"微博接口 JSON 解析失败: {exc}")
-                return []
+    response = await aiohttp_request(
+        "GET",
+        url,
+        timeout_seconds=20,
+        headers=get_weibo_headers(cookie, uid),
+    )
+    if response.status != 200:
+        logger.warning(f"微博接口请求失败，状态码：{response.status}")
+        return []
+    payload = response.payload
+    if payload is None:
+        return []
 
     if not isinstance(payload, dict) or payload.get("ok") != 1:
         logger.warning(
@@ -1504,19 +1776,18 @@ async def fetch_weibo_web_statuses(
 ) -> list[dict]:
     params = urlencode({"uid": uid, "page": 1, "feature": 0})
     url = f"{WEIBO_WEB_TIMELINE_API}?{params}"
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=get_weibo_web_headers(cookie, uid)
-    ) as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                logger.warning(f"微博网页端接口请求失败，状态码：{response.status}")
-                return []
-            try:
-                payload = await response.json(content_type=None)
-            except Exception as exc:
-                logger.warning(f"微博网页端接口 JSON 解析失败: {exc}")
-                return []
+    response = await aiohttp_request(
+        "GET",
+        url,
+        timeout_seconds=20,
+        headers=get_weibo_web_headers(cookie, uid),
+    )
+    if response.status != 200:
+        logger.warning(f"微博网页端接口请求失败，状态码：{response.status}")
+        return []
+    payload = response.payload
+    if payload is None:
+        return []
 
     if not isinstance(payload, dict) or payload.get("ok") != 1:
         if isinstance(payload, dict) and "login.php" in str(payload.get("url", "")):
@@ -1669,21 +1940,25 @@ async def get_bili_url() -> str:
         "https://docs.qq.com/dop-api/opendoc?"
         f"tab={sheet_id}&id={table_id}&outformat=1&normal=1"
     )
-    docs_json = await aiohttp_get(docs_url, headers=headers)
+    docs_json = await safe_aiohttp_get(docs_url, "腾讯文档接口", headers=headers)
     if docs_json:
         result = find_bili_url_in_obj(docs_json)
         if result:
             logger.info(f"从腾讯文档接口获取暖暖视频链接: {result}")
             return result
 
-    docs_text = await aiohttp_get(docs_url, res_type="text", headers=headers)
+    docs_text = await safe_aiohttp_get(
+        docs_url, "腾讯文档文本", res_type="text", headers=headers
+    )
     if docs_text:
         result = find_bili_url_in_text(docs_text)
         if result:
             logger.info(f"从腾讯文档文本获取暖暖视频链接: {result}")
             return result
 
-    docs_page = await aiohttp_get(QQ_DOC_URL, res_type="text", headers=headers)
+    docs_page = await safe_aiohttp_get(
+        QQ_DOC_URL, "腾讯文档页面", res_type="text", headers=headers
+    )
     if docs_page:
         result = find_bili_url_in_text(docs_page)
         if result:
@@ -1697,8 +1972,10 @@ async def get_bili_url() -> str:
         "https://api.bilibili.com/x/web-interface/search/type?"
         f"search_type=video&keyword={quote(prefix)}&page=1"
     )
-    search_data = await aiohttp_get(
-        search_url, headers={"referer": "https://search.bilibili.com/"}
+    search_data = await safe_aiohttp_get(
+        search_url,
+        "bilibili搜索接口",
+        headers={"referer": "https://search.bilibili.com/"},
     )
     if search_data and search_data.get("code") == 0:
         videos = search_data.get("data", {}).get("result", [])
@@ -1722,8 +1999,10 @@ async def get_bili_url() -> str:
     api_url = (
         f"https://api.bilibili.com/x/space/arc/search?mid={BILI_USER_ID}&ps=10&pn=1"
     )
-    data = await aiohttp_get(
-        api_url, headers={"referer": f"https://space.bilibili.com/{BILI_USER_ID}"}
+    data = await safe_aiohttp_get(
+        api_url,
+        "bilibili空间接口",
+        headers={"referer": f"https://space.bilibili.com/{BILI_USER_ID}"},
     )
     if data and data.get("code") == 0:
         videos = data.get("data", {}).get("list", {}).get("vlist", [])
@@ -2190,9 +2469,11 @@ async def create_market_text(query: MarketQuery) -> str:
 
     listings.sort(
         key=lambda item: (
-            item.get("pricePerUnit")
-            if item.get("pricePerUnit") is not None
-            else 10**18,
+            (
+                item.get("pricePerUnit")
+                if item.get("pricePerUnit") is not None
+                else 10**18
+            ),
             item.get("total") if item.get("total") is not None else 10**18,
         )
     )
@@ -2366,19 +2647,18 @@ def fflogs_region_entries(boss: dict, cn_source: bool) -> list[str]:
 
 
 async def get_fflogs_token(host: str, client_id: str, client_secret: str) -> str:
-    timeout = aiohttp.ClientTimeout(total=20)
     auth = aiohttp.BasicAuth(client_id, client_secret)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=api_request_headers()
-    ) as session:
-        async with session.post(
-            f"{host}/oauth/token",
-            data={"grant_type": "client_credentials"},
-            auth=auth,
-        ) as response:
-            if response.status != 200:
-                raise RuntimeError(f"FFLogs token 请求失败：{response.status}")
-            payload = await response.json(content_type=None)
+    response = await aiohttp_request(
+        "POST",
+        f"{host}/oauth/token",
+        timeout_seconds=20,
+        use_api_user_agent=True,
+        data={"grant_type": "client_credentials"},
+        auth=auth,
+    )
+    if response.status != 200:
+        raise RuntimeError(f"FFLogs token 请求失败：{response.status}")
+    payload = response.payload
     token = payload.get("access_token") if isinstance(payload, dict) else None
     if not token:
         raise RuntimeError("FFLogs token 响应缺少 access_token")
@@ -2386,18 +2666,20 @@ async def get_fflogs_token(host: str, client_id: str, client_secret: str) -> str
 
 
 async def fflogs_graphql(host: str, token: str, query: str, variables: dict) -> dict:
-    timeout = aiohttp.ClientTimeout(total=25)
     headers = api_request_headers(
         {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     )
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.post(
-            f"{host}/api/v2/client",
-            json={"query": query, "variables": variables},
-        ) as response:
-            if response.status != 200:
-                raise RuntimeError(f"FFLogs GraphQL 请求失败：{response.status}")
-            payload = await response.json(content_type=None)
+    response = await aiohttp_request(
+        "POST",
+        f"{host}/api/v2/client",
+        timeout_seconds=25,
+        headers=headers,
+        use_api_user_agent=True,
+        json_data={"query": query, "variables": variables},
+    )
+    if response.status != 200:
+        raise RuntimeError(f"FFLogs GraphQL 请求失败：{response.status}")
+    payload = response.payload
     if isinstance(payload, dict) and payload.get("errors"):
         raise RuntimeError("FFLogs GraphQL 返回错误")
     return payload if isinstance(payload, dict) else {}
@@ -2489,18 +2771,22 @@ def build_fflogs_metadata_boss(
         "pk": encounter_id,
         "quest": int(en_zone["id"]),
         "zone_name": en_zone.get("name") or "",
-        "cn_zone_name": cn_zone.get("name")
-        if isinstance(cn_zone, dict)
-        else en_zone.get("name") or "",
+        "cn_zone_name": (
+            cn_zone.get("name")
+            if isinstance(cn_zone, dict)
+            else en_zone.get("name") or ""
+        ),
         "name": en_name,
         "cn_name": cn_name or en_name,
         "nickname": [],
         "patch": 0,
         "savage": fflogs_metadata_difficulty(en_zone),
         "region": fflogs_metadata_regions(en_zone),
-        "cn_region": fflogs_metadata_regions(cn_zone)
-        if cn_zone
-        else fflogs_metadata_regions(en_zone),
+        "cn_region": (
+            fflogs_metadata_regions(cn_zone)
+            if cn_zone
+            else fflogs_metadata_regions(en_zone)
+        ),
     }
 
 
@@ -2920,8 +3206,9 @@ def log_fflogs_statistics_page_diagnostics(page: str, job: dict) -> None:
     logger.info(
         f"FFLogs statistics main-table-number td samples: {fflogs_debug_td_samples(decoded, r'main-table-number')}"
     )
+    primary_pattern = r"\bprimary\b"
     logger.info(
-        f"FFLogs statistics primary td samples: {fflogs_debug_td_samples(decoded, r'\\bprimary\\b')}"
+        f"FFLogs statistics primary td samples: {fflogs_debug_td_samples(decoded, primary_pattern)}"
     )
     logger.info(
         f"FFLogs statistics script src sample: {fflogs_debug_script_sources(decoded)}"
@@ -2952,7 +3239,12 @@ async def fetch_logs_statistics_summary(
             params["dpstype"] = query.dps_type
         url = f"{host}/zone/statistics/{boss['quest']}?{urlencode(params)}"
         logger.info(f"FFLogs statistics page URL: {url}")
-        page = await aiohttp_get(url, res_type="text", headers={"Referer": host})
+        page = await safe_aiohttp_get(
+            url,
+            "FFLogs statistics page",
+            res_type="text",
+            headers={"Referer": host},
+        )
         if not isinstance(page, str):
             return None
         if index == 0:
@@ -3010,7 +3302,12 @@ async def fetch_logs_statistics_browser_table(
             f"{urlencode(params)}"
         )
         logger.info(f"FFLogs statistics browser table URL: {url}")
-        page = await aiohttp_get(url, res_type="text", headers={"Referer": host})
+        page = await safe_aiohttp_get(
+            url,
+            "FFLogs statistics browser table",
+            res_type="text",
+            headers={"Referer": host},
+        )
         if not isinstance(page, str) or "data.push" not in page:
             continue
         rows = parse_logs_statistics_page(page)
@@ -3049,7 +3346,12 @@ async def fetch_logs_statistics_page(
                 f"{query_string}"
             )
             logger.info(f"FFLogs statistics table URL: {url}")
-            page = await aiohttp_get(url, res_type="text", headers={"Referer": host})
+            page = await safe_aiohttp_get(
+                url,
+                "FFLogs statistics table",
+                res_type="text",
+                headers={"Referer": host},
+            )
             if isinstance(page, str) and "data.push" in page:
                 logger.info(f"FFLogs statistics aggregate matched: {aggregate}")
                 return page, f"{region_info} / {aggregate}"
@@ -3970,6 +4272,20 @@ def format_house_time(timestamp_value) -> str:
         return "未知"
 
 
+def house_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def house_index_label(labels: list[str], value, fallback: str) -> str:
+    index = house_int(value, -1)
+    if 0 <= index < len(labels):
+        return labels[index]
+    return f"{fallback}({value})" if value is not None else fallback
+
+
 async def fetch_house_sales(server_id: int) -> list[dict] | None:
     query = urlencode({"server": server_id, "ts": int(datetime.now().timestamp())})
     payload = await aiohttp_get(f"{HOUSE_API_URL}?{query}", use_api_user_agent=True)
@@ -4007,24 +4323,28 @@ async def create_house_text(query: HouseQuery) -> str:
     filters = []
     if query.area_name:
         area_index = HOUSE_AREA_NAMES.index(query.area_name)
-        matched = [item for item in matched if item.get("Area") == area_index]
+        matched = [
+            item for item in matched if house_int(item.get("Area"), -1) == area_index
+        ]
         filters.append(query.area_name)
     if query.ward is not None:
         matched = [
-            item for item in matched if int(item.get("Slot") or 0) + 1 == query.ward
+            item for item in matched if house_int(item.get("Slot"), 0) + 1 == query.ward
         ]
         filters.append(f"{query.ward}区")
     if query.plot_id is not None:
         matched = [
-            item for item in matched if int(item.get("ID") or 0) == query.plot_id
+            item for item in matched if house_int(item.get("ID"), 0) == query.plot_id
         ]
         filters.append(f"{query.plot_id}号")
     if query.size_name:
         size_index = HOUSE_SIZE_NAMES.index(query.size_name)
-        matched = [item for item in matched if item.get("Size") == size_index]
+        matched = [
+            item for item in matched if house_int(item.get("Size"), -1) == size_index
+        ]
         filters.append(query.size_name)
     matched.sort(
-        key=lambda item: (int(item.get("Slot") or 0), int(item.get("ID") or 0))
+        key=lambda item: (house_int(item.get("Slot")), house_int(item.get("ID")))
     )
 
     filter_text = " ".join(filters) if filters else "全部"
@@ -4040,15 +4360,17 @@ async def create_house_text(query: HouseQuery) -> str:
             f"仅显示前 {len(shown)} 条，可在命令末尾添加数量，最多 {HOUSE_MAX_LISTINGS} 条。"
         )
     for index, item in enumerate(shown, start=1):
-        area_name = HOUSE_AREA_NAMES[int(item.get("Area") or 0)]
-        size_name = HOUSE_SIZE_NAMES[int(item.get("Size") or 0)]
-        slot = int(item.get("Slot") or 0) + 1
-        plot_id = int(item.get("ID") or 0)
-        price = int(item.get("Price") or 0)
+        area_name = house_index_label(HOUSE_AREA_NAMES, item.get("Area"), "未知区域")
+        size_name = house_index_label(HOUSE_SIZE_NAMES, item.get("Size"), "未知大小")
+        slot = house_int(item.get("Slot")) + 1
+        plot_id = house_int(item.get("ID"))
+        price = house_int(item.get("Price"))
         purchase_type = HOUSE_PURCHASE_TYPES.get(
-            int(item.get("PurchaseType") or 0), "未知"
+            house_int(item.get("PurchaseType"), -1), "未知"
         )
-        region_type = HOUSE_REGION_TYPES.get(int(item.get("RegionType") or 0), "未知")
+        region_type = HOUSE_REGION_TYPES.get(
+            house_int(item.get("RegionType"), -1), "未知"
+        )
         last_seen = format_house_time(item.get("LastSeen"))
         lines.append(
             f"{index:02d}. {area_name}{slot}区 {plot_id}号 {size_name} "
@@ -4230,7 +4552,7 @@ async def get_party_finder_entries_api_v2(
             listings.append(listing)
 
     if not listings:
-        return None
+        return []
 
     valid_listings = [
         listing for listing in listings[:fetch_limit] if isinstance(listing, dict)
@@ -4351,9 +4673,6 @@ async def get_party_finder_entries(
             return v2_entries
     except Exception as exc:
         logger.warning(f"招募板 API v2 获取失败，尝试 API v1: {exc}")
-    if duty_ids:
-        return []
-
     try:
         api_entries = await get_party_finder_entries_api_v1(
             data_centre,
@@ -4389,12 +4708,14 @@ class TataruPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
+        configure_network_settings(self.config)
         self.tarot_dict: dict | None = None
         self.cache_dir = PLUGIN_DIR / ".cache"
         self.calendar_task: asyncio.Task | None = None
         self.last_calendar_download_time: dict[str, datetime] = {}
 
     async def initialize(self):
+        debug_log("plugin.initialize", version=PLUGIN_VERSION)
         self.tarot_dict = load_tarot()
         self.cache_dir.mkdir(exist_ok=True)
         self.calendar_task = asyncio.create_task(self.download_calendar_loop())
@@ -4434,21 +4755,25 @@ class TataruPlugin(Star):
         )
 
     @filter.command("帮帮忙")
+    @debug_command("帮帮忙")
     async def help(self, event: AstrMessageEvent):
         """显示塔塔露当前指令。"""
         yield event.plain_result(create_help_text())
 
     @filter.command("选门")
+    @debug_command("选门")
     async def precious(self, event: AstrMessageEvent):
         """帮你选藏宝洞的门。"""
         yield event.plain_result("塔塔露在藏宝洞中横冲直撞！\n" + random_left_right())
 
     @filter.command("仙人彩")
+    @debug_command("仙人彩")
     async def lottery(self, event: AstrMessageEvent):
         """帮你选每周仙人仙彩数字。"""
         yield event.plain_result("塔塔露觉得这个可以！\n" + random_lottery())
 
     @filter.command("日历")
+    @debug_command("日历")
     async def calendar(self, event: AstrMessageEvent):
         """获取FF近期活动日历。"""
         requested_server = command_args(event.message_str, "日历") or None
@@ -4459,12 +4784,14 @@ class TataruPlugin(Star):
         yield event.plain_result(self.create_calendar_text(server))
 
     @filter.command("暖暖")
+    @debug_command("暖暖")
     async def nuannuan(self, event: AstrMessageEvent):
         """本周时尚品鉴作业。"""
         result = await self.create_nuannuan_result(event)
         yield result
 
     @filter.command("攻略")
+    @debug_command("攻略")
     async def dungeon_note(self, event: AstrMessageEvent):
         """查简单副本攻略。"""
         dungeon_info = command_args(event.message_str, "攻略")
@@ -4478,6 +4805,7 @@ class TataruPlugin(Star):
         yield event.image_result(str(image_path))
 
     @filter.command("招募")
+    @debug_command("招募")
     async def party_finder(self, event: AstrMessageEvent):
         """获取指定大区招募板信息。"""
         query = parse_party_finder_query(command_args(event.message_str, "招募"))
@@ -4503,7 +4831,6 @@ class TataruPlugin(Star):
             data_centre = data_centre or world["data_centre"]
         scope_label = world["name"] if world else (data_centre or "全服")
         duty_ids = await resolve_party_duty_ids(search_text)
-        api_search_text = None if duty_ids else search_text
         if duty_ids:
             logger.info(f"招募副本名解析为 duty_id: {search_text} -> {duty_ids}")
 
@@ -4513,7 +4840,7 @@ class TataruPlugin(Star):
                 world_name=world["name"] if world else None,
                 world_id=world["id"] if world else None,
                 category=query.category,
-                search_text=api_search_text,
+                search_text=search_text,
                 job_ids=query.job_ids,
                 duty_ids=duty_ids,
                 limit=query.limit,
@@ -4553,11 +4880,13 @@ class TataruPlugin(Star):
         yield event.chain_result(image_components)
 
     @filter.command("看看微博")
+    @debug_command("看看微博")
     async def ff_weibo(self, event: AstrMessageEvent):
         """获取FF官方微博新闻。"""
         yield event.plain_result(await get_ff_weibo_text(self.weibo_cookie()))
 
     @filter.command("物品")
+    @debug_command("物品")
     async def item(self, event: AstrMessageEvent):
         """查询物品信息。"""
         item_name = command_args(event.message_str, "物品")
@@ -4581,6 +4910,7 @@ class TataruPlugin(Star):
         yield event.chain_result(components)
 
     @filter.command("价格")
+    @debug_command("价格")
     async def market(self, event: AstrMessageEvent):
         """查询市场物价。"""
         market_query = await parse_market_query(command_args(event.message_str, "价格"))
@@ -4602,12 +4932,14 @@ class TataruPlugin(Star):
         yield event.image_result(str(image_path))
 
     @filter.command("房子")
+    @debug_command("房子")
     async def house(self, event: AstrMessageEvent):
         """查询指定服务器空房。"""
         async for result in self.create_house_result(event, "房子"):
             yield result
 
     @filter.command("房屋")
+    @debug_command("房屋")
     async def house_alias(self, event: AstrMessageEvent):
         """查询指定服务器空房。"""
         async for result in self.create_house_result(event, "房屋"):
@@ -4640,6 +4972,7 @@ class TataruPlugin(Star):
         yield event.chain_result(components)
 
     @filter.command("输出")
+    @debug_command("输出")
     async def logs_dps(self, event: AstrMessageEvent):
         """查询FFLogs输出分段。"""
         logs_query = parse_logs_query(
@@ -4654,6 +4987,7 @@ class TataruPlugin(Star):
         )
 
     @filter.command("logs")
+    @debug_command("logs")
     async def character_logs(self, event: AstrMessageEvent):
         """查询角色FFLogs战绩。"""
         logs_query = parse_character_logs_query(command_args(event.message_str, "logs"))
@@ -4667,6 +5001,7 @@ class TataruPlugin(Star):
         )
 
     @filter.command("抽卡")
+    @debug_command("抽卡")
     async def tarot(self, event: AstrMessageEvent):
         """随机抽取一张FF14塔罗牌。"""
         result = self.create_tarot_result(event)
@@ -4709,18 +5044,37 @@ class TataruPlugin(Star):
 
     async def download_calendar_once(self, server: str) -> bool:
         sources = CALENDAR_SOURCES[server]
-        result = await aiohttp_get(sources["primary"], res_type="bytes")
+        debug_log("calendar.refresh.start", server=server)
+
+        async def fetch_calendar_source(source_name: str, url: str) -> bytes | None:
+            try:
+                result = await aiohttp_get(url, res_type="bytes")
+            except Exception as exc:
+                logger.warning(f"{server}日历{source_name}更新异常: {exc}")
+                return None
+            if result is None:
+                return None
+            try:
+                Calendar.from_ical(result)
+            except Exception as exc:
+                logger.warning(f"{server}日历{source_name}内容解析失败: {exc}")
+                return None
+            return result
+
+        result = await fetch_calendar_source("主链接", sources["primary"])
         if result is None:
             logger.info(f"{server}日历主链接更新失败，尝试备用链接")
-            result = await aiohttp_get(sources["fallback"], res_type="bytes")
+            result = await fetch_calendar_source("备用链接", sources["fallback"])
 
         if result is None:
             logger.warning(f"{server}日历更新失败，将使用本地缓存")
+            debug_log("calendar.refresh.finish", server=server, updated=False)
             return False
 
         self.calendar_cache_path(server).write_bytes(result)
         self.last_calendar_download_time[server] = datetime.now()
         logger.info(f"{server}日历更新成功")
+        debug_log("calendar.refresh.finish", server=server, updated=True)
         return True
 
     async def ensure_calendar(self, server: str):
@@ -4729,13 +5083,24 @@ class TataruPlugin(Star):
             await self.download_calendar_once(server)
 
     def calendar_read_path(self, server: str) -> Path | None:
+        for calendar_path in self.calendar_read_paths(server):
+            try:
+                Calendar.from_ical(calendar_path.read_bytes())
+            except Exception as exc:
+                logger.warning(f"{server}日历文件解析失败: {calendar_path}, {exc}")
+                continue
+            return calendar_path
+        return None
+
+    def calendar_read_paths(self, server: str) -> list[Path]:
+        paths = []
         cache_path = self.calendar_cache_path(server)
         if cache_path.exists():
-            return cache_path
+            paths.append(cache_path)
         bundled_path = CALENDAR_SOURCES[server]["bundled"]
         if bundled_path and bundled_path.exists():
-            return bundled_path
-        return None
+            paths.append(bundled_path)
+        return paths
 
     def create_calendar_text(self, server: str) -> str:
         calendar_path = self.calendar_read_path(server)
@@ -4752,8 +5117,14 @@ class TataruPlugin(Star):
             if component.name != "VEVENT":
                 continue
 
-            start_raw = component.get("dtstart").dt
-            end_raw = component.get("dtend").dt
+            start_component = component.get("dtstart")
+            end_component = component.get("dtend")
+            if start_component is None or end_component is None:
+                logger.warning(f"{server}日历事件缺少开始或结束时间，已跳过")
+                continue
+
+            start_raw = start_component.dt
+            end_raw = end_component.dt
             start_date, start_info = normalize_calendar_date(start_raw)
             end_date, end_info = normalize_calendar_date(end_raw)
 
@@ -4837,4 +5208,5 @@ class TataruPlugin(Star):
     async def terminate(self):
         if self.calendar_task:
             self.calendar_task.cancel()
+        debug_log("plugin.terminate")
         logger.info("Tataru AstrBot plugin terminated.")
