@@ -1,4 +1,40 @@
 {
+  "debug_mode": {
+    "description": "调试模式",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后输出插件指令、缓存和联网请求的调试日志。Cookie、Token、密码等敏感字段会自动脱敏。"
+  },
+  "proxy_enabled": {
+    "description": "启用网络代理",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后插件的全部联网请求通过下方 HTTP 代理访问。关闭时保持原有直连行为。"
+  },
+  "proxy_host": {
+    "description": "代理地址",
+    "type": "string",
+    "default": "",
+    "hint": "填写 HTTP 代理的 IP 或主机名，例如 127.0.0.1；不要填写 http://、端口或路径。"
+  },
+  "proxy_port": {
+    "description": "代理端口",
+    "type": "int",
+    "default": 0,
+    "hint": "填写 HTTP 代理端口，范围为 1 到 65535。"
+  },
+  "proxy_username": {
+    "description": "代理用户名",
+    "type": "string",
+    "default": "",
+    "hint": "可选。需要认证的代理请与代理密码同时填写。"
+  },
+  "proxy_password": {
+    "description": "代理密码",
+    "type": "string",
+    "default": "",
+    "hint": "可选。需要认证的代理请与代理用户名同时填写；插件日志不会输出该值。"
+  },
   "use_global_calendar": {
     "description": "默认使用国际服日历",
     "type": "bool",

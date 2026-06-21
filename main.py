@@ -2,12 +2,15 @@ import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
 from email.utils import parsedate_to_datetime
+from functools import wraps
 import html
+import itertools
 import json
 import random
 import re
+import time
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 from astrbot.api import logger
@@ -43,6 +46,200 @@ BROWSER_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Edge/125.0 Safari/537.36",
 ]
+
+
+@dataclass(frozen=True)
+class NetworkSettings:
+    debug_mode: bool = False
+    proxy_enabled: bool = False
+    proxy_url: str | None = None
+    proxy_auth: aiohttp.BasicAuth | None = None
+    proxy_error: str | None = None
+
+
+@dataclass(frozen=True)
+class HttpResponse:
+    status: int
+    payload: object | None = None
+
+
+class ProxyConfigurationError(RuntimeError):
+    """Raised when proxy mode is enabled with incomplete settings."""
+
+
+NETWORK_SETTINGS = NetworkSettings()
+HTTP_REQUEST_COUNTER = itertools.count(1)
+SENSITIVE_DEBUG_KEYWORDS = (
+    "token",
+    "cookie",
+    "authorization",
+    "secret",
+    "password",
+    "credential",
+    "api_key",
+    "apikey",
+    "proxy_auth",
+)
+
+
+def is_sensitive_debug_key(key: str) -> bool:
+    normalized_key = key.lower().replace("-", "_")
+    return any(keyword in normalized_key for keyword in SENSITIVE_DEBUG_KEYWORDS)
+
+
+def mask_debug_secret(value: object) -> str:
+    text = str(value or "")
+    if len(text) <= 4:
+        return "*" * max(4, len(text))
+    return text[:2] + "*" * (len(text) - 4) + text[-2:]
+
+
+def sanitize_debug_url(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        if not parsed.query:
+            return url
+        query = urlencode(
+            [
+                (
+                    key,
+                    mask_debug_secret(value) if is_sensitive_debug_key(key) else value,
+                )
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            ],
+            doseq=True,
+            safe="*",
+        )
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment)
+        )
+    except Exception:
+        return "<invalid-url>"
+
+
+def sanitize_debug_value(value: object, key: str = "") -> object:
+    if is_sensitive_debug_key(key):
+        return mask_debug_secret(value)
+    if key.lower() == "url" and isinstance(value, str):
+        return sanitize_debug_url(value)
+    if isinstance(value, dict):
+        return {
+            str(item_key): sanitize_debug_value(item_value, str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_debug_value(item) for item in value]
+    return value
+
+
+def debug_log(event: str, *, proxy_used: bool = False, **fields: object) -> None:
+    if not NETWORK_SETTINGS.debug_mode:
+        return
+    prefix = "[Tataru Debug]"
+    if proxy_used:
+        prefix += " [Proxy]"
+    details = " ".join(
+        f"{key}={sanitize_debug_value(value, key)!r}" for key, value in fields.items()
+    )
+    logger.info(f"{prefix} event={event}" + (f" {details}" if details else ""))
+
+
+def configure_network_settings(config: dict | None) -> None:
+    global NETWORK_SETTINGS
+
+    config = config or {}
+    debug_mode = bool(config.get("debug_mode", False))
+    proxy_enabled = bool(config.get("proxy_enabled", False))
+    if not proxy_enabled:
+        NETWORK_SETTINGS = NetworkSettings(debug_mode=debug_mode)
+        debug_log("proxy.configuration", enabled=False)
+        return
+
+    host = str(config.get("proxy_host", "") or "").strip()
+    username = str(config.get("proxy_username", "") or "").strip()
+    password = str(config.get("proxy_password", "") or "")
+    try:
+        port = int(config.get("proxy_port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+
+    error = None
+    if not host:
+        error = "代理已启用，但未填写代理地址"
+    elif "://" in host or "/" in host:
+        error = "代理地址仅填写 IP 或主机名，不要包含协议或路径"
+    elif not 1 <= port <= 65535:
+        error = "代理端口必须在 1 到 65535 之间"
+    elif bool(username) != bool(password):
+        error = "代理用户名和密码需要同时填写或同时留空"
+
+    if error:
+        NETWORK_SETTINGS = NetworkSettings(
+            debug_mode=debug_mode,
+            proxy_enabled=True,
+            proxy_error=error,
+        )
+        logger.warning(f"[Proxy] {error}")
+        debug_log(
+            "proxy.configuration", proxy_used=True, enabled=True, status="invalid"
+        )
+        return
+
+    proxy_host = host.strip("[]")
+    if ":" in proxy_host:
+        proxy_host = f"[{proxy_host}]"
+    NETWORK_SETTINGS = NetworkSettings(
+        debug_mode=debug_mode,
+        proxy_enabled=True,
+        proxy_url=f"http://{proxy_host}:{port}",
+        proxy_auth=aiohttp.BasicAuth(username, password) if username else None,
+    )
+    debug_log(
+        "proxy.configuration",
+        proxy_used=True,
+        enabled=True,
+        host=host,
+        port=port,
+        authentication=bool(username),
+    )
+
+
+def proxy_request_options() -> dict:
+    if not NETWORK_SETTINGS.proxy_enabled:
+        return {}
+    if NETWORK_SETTINGS.proxy_error:
+        raise ProxyConfigurationError(NETWORK_SETTINGS.proxy_error)
+    options = {"proxy": NETWORK_SETTINGS.proxy_url}
+    if NETWORK_SETTINGS.proxy_auth:
+        options["proxy_auth"] = NETWORK_SETTINGS.proxy_auth
+    return options
+
+
+def debug_command(command_name: str):
+    """Log command lifecycle events when plugin debug mode is enabled."""
+
+    def decorator(handler):
+        @wraps(handler)
+        async def wrapper(self, *args, **kwargs):
+            debug_log("command.start", command=command_name)
+            try:
+                async for result in handler(self, *args, **kwargs):
+                    yield result
+            except Exception as exc:
+                debug_log(
+                    "command.error",
+                    command=command_name,
+                    error_type=type(exc).__name__,
+                )
+                raise
+            finally:
+                debug_log("command.finish", command=command_name)
+
+        return wrapper
+
+    return decorator
+
+
 DATA_DIR = PLUGIN_DIR / "data"
 TAROT_DIR = DATA_DIR / "TarotImages"
 TAROT_JSON = TAROT_DIR / "ff14_tarot.json"
@@ -683,28 +880,99 @@ async def aiohttp_get(
     headers: dict | None = None,
     use_api_user_agent: bool = False,
 ):
+    result = await aiohttp_request(
+        "GET",
+        url,
+        res_type=res_type,
+        timeout_seconds=timeout_seconds,
+        headers=headers,
+        use_api_user_agent=use_api_user_agent,
+    )
+    return result.payload if result.status == 200 else None
+
+
+async def aiohttp_request(
+    method: str,
+    url: str,
+    *,
+    res_type: str = "json",
+    timeout_seconds: int = 15,
+    headers: dict | None = None,
+    use_api_user_agent: bool = False,
+    data: dict | None = None,
+    json_data: dict | None = None,
+    auth: aiohttp.BasicAuth | None = None,
+) -> HttpResponse:
     request_headers = (
         api_request_headers(headers)
         if use_api_user_agent
         else browser_request_headers(headers)
     )
-
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=request_headers
-    ) as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                return None
-            if res_type == "bytes":
-                return await response.read()
-            if res_type == "text":
-                return await response.text()
-            try:
-                return await response.json(content_type=None)
-            except Exception as exc:
-                logger.warning(f"JSON响应解析失败: {url}, {exc}")
-                return None
+    request_options = proxy_request_options()
+    proxy_used = bool(request_options)
+    request_id = next(HTTP_REQUEST_COUNTER)
+    start_time = time.monotonic()
+    debug_log(
+        "http.request.start",
+        proxy_used=proxy_used,
+        request_id=request_id,
+        method=method.upper(),
+        url=url,
+        timeout_seconds=timeout_seconds,
+        header_names=sorted(request_headers),
+        has_body=bool(data or json_data),
+        has_auth=auth is not None,
+    )
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout, headers=request_headers
+        ) as session:
+            async with session.request(
+                method,
+                url,
+                data=data,
+                json=json_data,
+                auth=auth,
+                **request_options,
+            ) as response:
+                payload = None
+                if response.status == 200:
+                    if res_type == "bytes":
+                        payload = await response.read()
+                    elif res_type == "text":
+                        payload = await response.text()
+                    else:
+                        try:
+                            payload = await response.json(content_type=None)
+                        except Exception as exc:
+                            logger.warning(
+                                f"JSON响应解析失败: {sanitize_debug_url(url)}, {exc}"
+                            )
+                            debug_log(
+                                "http.response.parse_error",
+                                proxy_used=proxy_used,
+                                request_id=request_id,
+                                error_type=type(exc).__name__,
+                            )
+                debug_log(
+                    "http.request.finish",
+                    proxy_used=proxy_used,
+                    request_id=request_id,
+                    status=response.status,
+                    elapsed_ms=round((time.monotonic() - start_time) * 1000),
+                    content_length=response.content_length,
+                )
+                return HttpResponse(response.status, payload)
+    except Exception as exc:
+        debug_log(
+            "http.request.error",
+            proxy_used=proxy_used,
+            request_id=request_id,
+            error_type=type(exc).__name__,
+            elapsed_ms=round((time.monotonic() - start_time) * 1000),
+        )
+        raise
 
 
 async def safe_aiohttp_get(url: str, context: str, **kwargs):
@@ -1482,19 +1750,18 @@ async def fetch_weibo_cards(
 ) -> list[dict]:
     params = urlencode({"type": "uid", "value": uid, "containerid": f"107603{uid}"})
     url = f"{WEIBO_API_BASE}?{params}"
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=get_weibo_headers(cookie, uid)
-    ) as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                logger.warning(f"微博接口请求失败，状态码：{response.status}")
-                return []
-            try:
-                payload = await response.json(content_type=None)
-            except Exception as exc:
-                logger.warning(f"微博接口 JSON 解析失败: {exc}")
-                return []
+    response = await aiohttp_request(
+        "GET",
+        url,
+        timeout_seconds=20,
+        headers=get_weibo_headers(cookie, uid),
+    )
+    if response.status != 200:
+        logger.warning(f"微博接口请求失败，状态码：{response.status}")
+        return []
+    payload = response.payload
+    if payload is None:
+        return []
 
     if not isinstance(payload, dict) or payload.get("ok") != 1:
         logger.warning(
@@ -1511,19 +1778,18 @@ async def fetch_weibo_web_statuses(
 ) -> list[dict]:
     params = urlencode({"uid": uid, "page": 1, "feature": 0})
     url = f"{WEIBO_WEB_TIMELINE_API}?{params}"
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=get_weibo_web_headers(cookie, uid)
-    ) as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                logger.warning(f"微博网页端接口请求失败，状态码：{response.status}")
-                return []
-            try:
-                payload = await response.json(content_type=None)
-            except Exception as exc:
-                logger.warning(f"微博网页端接口 JSON 解析失败: {exc}")
-                return []
+    response = await aiohttp_request(
+        "GET",
+        url,
+        timeout_seconds=20,
+        headers=get_weibo_web_headers(cookie, uid),
+    )
+    if response.status != 200:
+        logger.warning(f"微博网页端接口请求失败，状态码：{response.status}")
+        return []
+    payload = response.payload
+    if payload is None:
+        return []
 
     if not isinstance(payload, dict) or payload.get("ok") != 1:
         if isinstance(payload, dict) and "login.php" in str(payload.get("url", "")):
@@ -2383,19 +2649,18 @@ def fflogs_region_entries(boss: dict, cn_source: bool) -> list[str]:
 
 
 async def get_fflogs_token(host: str, client_id: str, client_secret: str) -> str:
-    timeout = aiohttp.ClientTimeout(total=20)
     auth = aiohttp.BasicAuth(client_id, client_secret)
-    async with aiohttp.ClientSession(
-        timeout=timeout, headers=api_request_headers()
-    ) as session:
-        async with session.post(
-            f"{host}/oauth/token",
-            data={"grant_type": "client_credentials"},
-            auth=auth,
-        ) as response:
-            if response.status != 200:
-                raise RuntimeError(f"FFLogs token 请求失败：{response.status}")
-            payload = await response.json(content_type=None)
+    response = await aiohttp_request(
+        "POST",
+        f"{host}/oauth/token",
+        timeout_seconds=20,
+        use_api_user_agent=True,
+        data={"grant_type": "client_credentials"},
+        auth=auth,
+    )
+    if response.status != 200:
+        raise RuntimeError(f"FFLogs token 请求失败：{response.status}")
+    payload = response.payload
     token = payload.get("access_token") if isinstance(payload, dict) else None
     if not token:
         raise RuntimeError("FFLogs token 响应缺少 access_token")
@@ -2403,18 +2668,20 @@ async def get_fflogs_token(host: str, client_id: str, client_secret: str) -> str
 
 
 async def fflogs_graphql(host: str, token: str, query: str, variables: dict) -> dict:
-    timeout = aiohttp.ClientTimeout(total=25)
     headers = api_request_headers(
         {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     )
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.post(
-            f"{host}/api/v2/client",
-            json={"query": query, "variables": variables},
-        ) as response:
-            if response.status != 200:
-                raise RuntimeError(f"FFLogs GraphQL 请求失败：{response.status}")
-            payload = await response.json(content_type=None)
+    response = await aiohttp_request(
+        "POST",
+        f"{host}/api/v2/client",
+        timeout_seconds=25,
+        headers=headers,
+        use_api_user_agent=True,
+        json_data={"query": query, "variables": variables},
+    )
+    if response.status != 200:
+        raise RuntimeError(f"FFLogs GraphQL 请求失败：{response.status}")
+    payload = response.payload
     if isinstance(payload, dict) and payload.get("errors"):
         raise RuntimeError("FFLogs GraphQL 返回错误")
     return payload if isinstance(payload, dict) else {}
@@ -4443,12 +4710,14 @@ class TataruPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
+        configure_network_settings(self.config)
         self.tarot_dict: dict | None = None
         self.cache_dir = PLUGIN_DIR / ".cache"
         self.calendar_task: asyncio.Task | None = None
         self.last_calendar_download_time: dict[str, datetime] = {}
 
     async def initialize(self):
+        debug_log("plugin.initialize", version=PLUGIN_VERSION)
         self.tarot_dict = load_tarot()
         self.cache_dir.mkdir(exist_ok=True)
         self.calendar_task = asyncio.create_task(self.download_calendar_loop())
@@ -4488,21 +4757,25 @@ class TataruPlugin(Star):
         )
 
     @filter.command("帮帮忙")
+    @debug_command("帮帮忙")
     async def help(self, event: AstrMessageEvent):
         """显示塔塔露当前指令。"""
         yield event.plain_result(create_help_text())
 
     @filter.command("选门")
+    @debug_command("选门")
     async def precious(self, event: AstrMessageEvent):
         """帮你选藏宝洞的门。"""
         yield event.plain_result("塔塔露在藏宝洞中横冲直撞！\n" + random_left_right())
 
     @filter.command("仙人彩")
+    @debug_command("仙人彩")
     async def lottery(self, event: AstrMessageEvent):
         """帮你选每周仙人仙彩数字。"""
         yield event.plain_result("塔塔露觉得这个可以！\n" + random_lottery())
 
     @filter.command("日历")
+    @debug_command("日历")
     async def calendar(self, event: AstrMessageEvent):
         """获取FF近期活动日历。"""
         requested_server = command_args(event.message_str, "日历") or None
@@ -4513,12 +4786,14 @@ class TataruPlugin(Star):
         yield event.plain_result(self.create_calendar_text(server))
 
     @filter.command("暖暖")
+    @debug_command("暖暖")
     async def nuannuan(self, event: AstrMessageEvent):
         """本周时尚品鉴作业。"""
         result = await self.create_nuannuan_result(event)
         yield result
 
     @filter.command("攻略")
+    @debug_command("攻略")
     async def dungeon_note(self, event: AstrMessageEvent):
         """查简单副本攻略。"""
         dungeon_info = command_args(event.message_str, "攻略")
@@ -4532,6 +4807,7 @@ class TataruPlugin(Star):
         yield event.image_result(str(image_path))
 
     @filter.command("招募")
+    @debug_command("招募")
     async def party_finder(self, event: AstrMessageEvent):
         """获取指定大区招募板信息。"""
         query = parse_party_finder_query(command_args(event.message_str, "招募"))
@@ -4606,11 +4882,13 @@ class TataruPlugin(Star):
         yield event.chain_result(image_components)
 
     @filter.command("看看微博")
+    @debug_command("看看微博")
     async def ff_weibo(self, event: AstrMessageEvent):
         """获取FF官方微博新闻。"""
         yield event.plain_result(await get_ff_weibo_text(self.weibo_cookie()))
 
     @filter.command("物品")
+    @debug_command("物品")
     async def item(self, event: AstrMessageEvent):
         """查询物品信息。"""
         item_name = command_args(event.message_str, "物品")
@@ -4634,6 +4912,7 @@ class TataruPlugin(Star):
         yield event.chain_result(components)
 
     @filter.command("价格")
+    @debug_command("价格")
     async def market(self, event: AstrMessageEvent):
         """查询市场物价。"""
         market_query = await parse_market_query(command_args(event.message_str, "价格"))
@@ -4655,12 +4934,14 @@ class TataruPlugin(Star):
         yield event.image_result(str(image_path))
 
     @filter.command("房子")
+    @debug_command("房子")
     async def house(self, event: AstrMessageEvent):
         """查询指定服务器空房。"""
         async for result in self.create_house_result(event, "房子"):
             yield result
 
     @filter.command("房屋")
+    @debug_command("房屋")
     async def house_alias(self, event: AstrMessageEvent):
         """查询指定服务器空房。"""
         async for result in self.create_house_result(event, "房屋"):
@@ -4693,6 +4974,7 @@ class TataruPlugin(Star):
         yield event.chain_result(components)
 
     @filter.command("输出")
+    @debug_command("输出")
     async def logs_dps(self, event: AstrMessageEvent):
         """查询FFLogs输出分段。"""
         logs_query = parse_logs_query(
@@ -4707,6 +4989,7 @@ class TataruPlugin(Star):
         )
 
     @filter.command("logs")
+    @debug_command("logs")
     async def character_logs(self, event: AstrMessageEvent):
         """查询角色FFLogs战绩。"""
         logs_query = parse_character_logs_query(command_args(event.message_str, "logs"))
@@ -4720,6 +5003,7 @@ class TataruPlugin(Star):
         )
 
     @filter.command("抽卡")
+    @debug_command("抽卡")
     async def tarot(self, event: AstrMessageEvent):
         """随机抽取一张FF14塔罗牌。"""
         result = self.create_tarot_result(event)
@@ -4762,6 +5046,7 @@ class TataruPlugin(Star):
 
     async def download_calendar_once(self, server: str) -> bool:
         sources = CALENDAR_SOURCES[server]
+        debug_log("calendar.refresh.start", server=server)
 
         async def fetch_calendar_source(source_name: str, url: str) -> bytes | None:
             try:
@@ -4785,11 +5070,13 @@ class TataruPlugin(Star):
 
         if result is None:
             logger.warning(f"{server}日历更新失败，将使用本地缓存")
+            debug_log("calendar.refresh.finish", server=server, updated=False)
             return False
 
         self.calendar_cache_path(server).write_bytes(result)
         self.last_calendar_download_time[server] = datetime.now()
         logger.info(f"{server}日历更新成功")
+        debug_log("calendar.refresh.finish", server=server, updated=True)
         return True
 
     async def ensure_calendar(self, server: str):
@@ -4923,4 +5210,5 @@ class TataruPlugin(Star):
     async def terminate(self):
         if self.calendar_task:
             self.calendar_task.cancel()
+        debug_log("plugin.terminate")
         logger.info("Tataru AstrBot plugin terminated.")
