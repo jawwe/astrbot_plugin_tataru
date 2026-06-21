@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
@@ -188,6 +189,41 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
         "Authorization": "Bearer abc",
         "X-Token": "abc",
     }
+    assert (
+        plugin_module.configured_risingstones_cookie(
+            {"risingstones_cookie": "session=owner"}
+        )
+        == "session=owner"
+    )
+    assert plugin_module.configured_risingstones_cookie(None) == ""
+
+
+def test_risingstones_personal_actions_never_use_owner_cookie(
+    plugin_module, monkeypatch
+) -> None:
+    """Personal account data must be rejected before any global fallback is considered."""
+
+    class GroupEvent:
+        def is_private_chat(self) -> bool:
+            return False
+
+    plugin = object.__new__(plugin_module.TataruPlugin)
+    plugin.config = {"risingstones_cookie": "session=owner"}
+
+    async def no_glamour_rows(*_args, **_kwargs) -> list[dict]:
+        return []
+
+    monkeypatch.setattr(plugin_module, "risingstones_glamour_rows", no_glamour_rows)
+
+    personal_result = asyncio.run(
+        plugin.risingstones_private_action(GroupEvent(), "我的")
+    )
+    session_result = asyncio.run(
+        plugin.risingstones_private_action(GroupEvent(), "幻化")
+    )
+
+    assert "仅支持私聊" in personal_result
+    assert session_result == "没有找到符合条件的石之家幻化投稿。"
 
 
 def test_risingstones_private_response_formatting(plugin_module) -> None:

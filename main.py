@@ -1619,8 +1619,9 @@ def create_help_text() -> str:
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
+[石之家 幻化/部队] 使用主人Cookie或私聊Cookie查询登录态内容
 [石之家 绑定 Cookie请求头或BearerToken] 私聊绑定石之家账号
-[石之家 我的/通知/统计/幻化/部队/签到/自动签到 开启/关闭/解绑] 私聊账号管理
+[石之家 我的/通知/统计/签到/自动签到 开启/关闭/解绑] 仅私聊个人账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -2009,6 +2010,11 @@ def risingstones_credential_headers(credential: str) -> dict[str, str]:
     if value.lower().startswith("bearer "):
         value = value.split(" ", 1)[1].strip()
     return {"Authorization": f"Bearer {value}", "X-Token": value}
+
+
+def configured_risingstones_cookie(config: dict | None) -> str:
+    """Read the optional operator-owned cookie without logging its value."""
+    return str((config or {}).get("risingstones_cookie", "") or "").strip()
 
 
 def risingstones_account_key(event: AstrMessageEvent) -> str | None:
@@ -5730,6 +5736,9 @@ class TataruPlugin(Star):
     def ffxiv_icon_font_path(self) -> str:
         return str(self.config.get("ffxiv_icon_font_path", "") or "").strip()
 
+    def risingstones_owner_cookie(self) -> str:
+        return configured_risingstones_cookie(self.config)
+
     def risingstones_checkin_hour(self) -> int:
         try:
             hour = int(self.config.get("risingstones_checkin_hour", 8))
@@ -5854,54 +5863,60 @@ class TataruPlugin(Star):
         action, _, argument = raw_query.partition(" ")
         action = action.strip()
         argument = argument.strip()
-        if action not in {
-            "绑定",
-            "解绑",
-            "签到",
-            "自动签到",
-            "我的",
-            "通知",
-            "统计",
-            "幻化",
-            "部队",
-        }:
+        personal_actions = {"绑定", "解绑", "签到", "自动签到", "我的", "通知", "统计"}
+        session_actions = {"幻化", "部队"}
+        if action not in personal_actions | session_actions:
             return None
-        if not is_risingstones_private_event(event):
-            return "石之家账号绑定、签到和自动签到仅支持私聊使用。"
-        account_key = risingstones_account_key(event)
-        if not account_key:
-            return "无法识别当前私聊账号，请更换平台后重试。"
+        account_key = None
+        credential = None
+        if action in personal_actions:
+            if not is_risingstones_private_event(event):
+                return "石之家本人信息、签到和自动签到仅支持私聊，并且需要先私聊绑定 Cookie。"
+            account_key = risingstones_account_key(event)
+            if not account_key:
+                return "无法识别当前私聊账号，请更换平台后重试。"
 
-        if action == "绑定":
-            credential = argument.removeprefix("Cookie:").strip()
-            if not credential:
-                return "绑定格式：石之家 绑定 Cookie 请求头或 Bearer Token"
-            try:
-                profile = await risingstones_verify_credential(credential)
-            except Exception as exc:
-                logger.warning(f"石之家凭据验证失败: {exc}")
-                return "石之家凭据验证失败，请确认 Cookie 请求头或 Token 仍然有效。"
-            self.risingstones_accounts.set_credential(account_key, credential)
-            character_name = str(profile.get("character_name") or "已绑定角色")
-            server = "@".join(
-                part
-                for part in (
-                    str(profile.get("area_name") or "").strip(),
-                    str(profile.get("group_name") or "").strip(),
+            if action == "绑定":
+                credential = argument.removeprefix("Cookie:").strip()
+                if not credential:
+                    return "绑定格式：石之家 绑定 Cookie 请求头或 Bearer Token"
+                try:
+                    profile = await risingstones_verify_credential(credential)
+                except Exception as exc:
+                    logger.warning(f"石之家凭据验证失败: {exc}")
+                    return "石之家凭据验证失败，请确认 Cookie 请求头或 Token 仍然有效。"
+                self.risingstones_accounts.set_credential(account_key, credential)
+                character_name = str(profile.get("character_name") or "已绑定角色")
+                server = "@".join(
+                    part
+                    for part in (
+                        str(profile.get("area_name") or "").strip(),
+                        str(profile.get("group_name") or "").strip(),
+                    )
+                    if part
                 )
-                if part
-            )
-            return (
-                f"石之家账号已绑定：{character_name}{f' @ {server}' if server else ''}"
-            )
+                return f"石之家账号已绑定：{character_name}{f' @ {server}' if server else ''}"
 
-        if action == "解绑":
-            self.risingstones_accounts.remove(account_key)
-            return "石之家账号凭据和自动签到设置已移除。"
+            if action == "解绑":
+                self.risingstones_accounts.remove(account_key)
+                return "石之家账号凭据和自动签到设置已移除。"
 
-        credential = self.risingstones_accounts.get_credential(account_key)
-        if not credential:
-            return "尚未绑定石之家账号，请先在私聊发送：石之家 绑定 Cookie 请求头或 Bearer Token"
+            credential = self.risingstones_accounts.get_credential(account_key)
+            if not credential:
+                return (
+                    "尚未通过私聊绑定石之家 Cookie，请先发送：石之家 绑定 Cookie 请求头"
+                )
+        else:
+            if is_risingstones_private_event(event):
+                account_key = risingstones_account_key(event)
+                credential = (
+                    self.risingstones_accounts.get_credential(account_key)
+                    if account_key
+                    else None
+                )
+            credential = credential or self.risingstones_owner_cookie()
+            if not credential:
+                return "石之家幻化和部队招待需要主人在插件设置中填写石之家 Cookie，或在私聊中绑定 Cookie。"
 
         if action == "我的":
             try:
@@ -5952,7 +5967,7 @@ class TataruPlugin(Star):
                 return str(exc)
             except Exception as exc:
                 logger.warning(f"石之家幻化查询失败: {exc}")
-                return "石之家幻化查询失败，请检查凭据是否过期后重新绑定。"
+                return "石之家幻化查询失败，请检查私聊凭据或插件设置页的石之家主人 Cookie。"
             if not rows:
                 return "没有找到符合条件的石之家幻化投稿。"
             return format_risingstones_glamour(query, rows)
@@ -5965,7 +5980,7 @@ class TataruPlugin(Star):
                 return str(exc)
             except Exception as exc:
                 logger.warning(f"石之家部队招待查询失败: {exc}")
-                return "石之家部队招待查询失败，请检查凭据是否过期后重新绑定。"
+                return "石之家部队招待查询失败，请检查私聊凭据或插件设置页的石之家主人 Cookie。"
             if not rows:
                 return "没有找到符合条件的石之家部队招待。"
             return format_risingstones_guilds(query, rows)

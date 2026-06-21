@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.18-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.19-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -96,7 +96,7 @@ https://github.com/jawwe/astrbot_plugin_tataru
 
 ### 石之家账号与签到
 
-以下命令仅能在私聊中使用。凭据按平台和用户独立保存到插件本地 SQLite 数据库，不会在消息或日志中回显。
+`我的`、`通知`、`统计`、签到和自动签到仅能在私聊中使用，并且必须由对应用户私聊绑定 Cookie 或 Token。凭据按平台和用户独立保存到插件本地 SQLite 数据库，不会在消息或日志中回显。
 
 ```text
 石之家 绑定 Cookie 请求头
@@ -125,9 +125,9 @@ https://github.com/jawwe/astrbot_plugin_tataru
 
 `石之家 统计` 默认汇总当前角色有记录的战场、绝境、钓鱼、零式、幻化、蜃景幻界和深层迷宫数据。可指定 `战场`、`绝境`、`钓鱼`、`零式`、`幻化`、`蜃景` 或 `深层` 查询单项。
 
-`石之家 幻化` 查询投稿列表或按标题检索；使用 `装备` 可按装备名称检索相关投稿，使用 `详情` 加投稿 ID 可查看单条投稿。
+`石之家 幻化` 查询投稿列表或按标题检索；使用 `装备` 可按装备名称检索相关投稿，使用 `详情` 加投稿 ID 可查看单条投稿。它优先使用私聊绑定凭据；未绑定时可使用插件设置页的主人 Cookie。
 
-`石之家 部队` 查询登录态可见的部队招待，支持按部队名称检索和按 ID 查看详情。
+`石之家 部队` 查询登录态可见的部队招待，支持按部队名称检索和按 ID 查看详情。它优先使用私聊绑定凭据；未绑定时可使用插件设置页的主人 Cookie。
 
 ### 招募
 
@@ -204,6 +204,7 @@ logs 角色名 服务器名 国际服
 | `font_path` | 空 | 文本转图片字体路径，留空时自动尝试 Linux 系统中文字体 |
 | `ffxiv_icon_font_path` | 空 | `招募` 卡片渲染 FFXIV 游戏内特殊图标字符时使用的本地图标字体路径 |
 | `risingstones_checkin_hour` | `8` | 已开启石之家自动签到的账号每日执行时点，使用 `Asia/Shanghai` 时区 |
+| `risingstones_cookie` | 空 | 主人填写的石之家 Cookie，用于幻化和部队招待等非个人信息查询；不会替代私聊用户的个人 Cookie |
 
 ### 字体建议
 

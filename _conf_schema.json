@@ -82,5 +82,11 @@
     "type": "int",
     "default": 8,
     "hint": "仅对已在私聊中绑定账号且手动开启自动签到的用户生效，使用 Asia/Shanghai 时区。范围为 0 到 23。"
+  },
+  "risingstones_cookie": {
+    "description": "石之家主人 Cookie",
+    "type": "string",
+    "default": "",
+    "hint": "可选。填写石之家网页请求的完整 Cookie 值，用于幻化投稿和部队招待等需要登录态但不查询个人资料的功能。不要公开分享；插件日志不会输出该值。"
   }
 }
