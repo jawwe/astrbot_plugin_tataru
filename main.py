@@ -4,6 +4,7 @@ from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 from functools import wraps
 import html
+import ipaddress
 import itertools
 import json
 import random
@@ -166,9 +167,16 @@ def configure_network_settings(config: dict | None) -> None:
         error = "代理已启用，但未填写代理地址"
     elif "://" in host or "/" in host:
         error = "代理地址仅填写 IP 或主机名，不要包含协议或路径"
-    elif not 1 <= port <= 65535:
+    else:
+        proxy_host = host.strip("[]")
+        try:
+            ipaddress.IPv6Address(proxy_host)
+        except ValueError:
+            if re.search(r":\d+$", proxy_host):
+                error = "代理地址仅填写 IP 或主机名，端口请填写在单独的端口字段中"
+    if not error and not 1 <= port <= 65535:
         error = "代理端口必须在 1 到 65535 之间"
-    elif bool(username) != bool(password):
+    elif not error and bool(username) != bool(password):
         error = "代理用户名和密码需要同时填写或同时留空"
 
     if error:
