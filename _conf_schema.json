@@ -76,5 +76,11 @@
     "type": "string",
     "default": "",
     "hint": "可选。用于“招募”卡片渲染游戏内特殊图标字符（U+E020-U+E0DB）。建议下载 FFXIV_Lodestone_SSF.ttf 到本地后填写绝对路径。"
+  },
+  "risingstones_checkin_hour": {
+    "description": "石之家自动签到时点",
+    "type": "int",
+    "default": 8,
+    "hint": "仅对已在私聊中绑定账号且手动开启自动签到的用户生效，使用 Asia/Shanghai 时区。范围为 0 到 23。"
   }
 }

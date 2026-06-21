@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.13-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.14-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -94,6 +94,21 @@ https://github.com/jawwe/astrbot_plugin_tataru
 
 在 `石之家 招募` 下，可查询公开的 `副本`、`萌新`、`其他` 和 `RP` 招募；部队招待需要登录态，会在石之家账号绑定功能中提供。
 
+### 石之家账号与签到
+
+以下命令仅能在私聊中使用。凭据按平台和用户独立保存到插件本地 SQLite 数据库，不会在消息或日志中回显。
+
+```text
+石之家 绑定 Cookie 请求头
+石之家 绑定 Bearer Token
+石之家 签到
+石之家 自动签到 开启
+石之家 自动签到 关闭
+石之家 解绑
+```
+
+绑定会先验证账号是否已绑定角色。自动签到默认关闭；开启后，插件会在 `Asia/Shanghai` 时区的配置时点执行，每个账号每天最多尝试一次。
+
 ### 招募
 
 ```text
@@ -168,6 +183,7 @@ logs 角色名 服务器名 国际服
 | `use_global_fflogs` | `false` | `输出` 和 `logs` 默认查询国际服 FFLogs |
 | `font_path` | 空 | 文本转图片字体路径，留空时自动尝试 Linux 系统中文字体 |
 | `ffxiv_icon_font_path` | 空 | `招募` 卡片渲染 FFXIV 游戏内特殊图标字符时使用的本地图标字体路径 |
+| `risingstones_checkin_hour` | `8` | 已开启石之家自动签到的账号每日执行时点，使用 `Asia/Shanghai` 时区 |
 
 ### 字体建议
 

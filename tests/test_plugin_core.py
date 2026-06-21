@@ -163,3 +163,28 @@ def test_risingstones_recruit_query_and_formatting(plugin_module) -> None:
     assert "【石之家招募】类型：副本 关键词：妖星乱舞 数量：1" in text
     assert "需求：防护职业" in text
     assert "#/recruit/party?id=53483" in text
+
+
+def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> None:
+    """Keep credentials isolated per account and auto check-ins bounded by day."""
+    store = plugin_module.RisingstonesAccountStore(tmp_path / "risingstones.sqlite3")
+    store.initialize()
+    store.set_credential("qq:10001", "session=abc")
+    assert store.get_credential("qq:10001") == "session=abc"
+    assert store.due_auto_checkins("2026-06-22") == []
+
+    assert store.set_auto_checkin("qq:10001", True)
+    assert store.due_auto_checkins("2026-06-22") == [("qq:10001", "session=abc")]
+    store.mark_attempt("qq:10001", "2026-06-22")
+    assert store.due_auto_checkins("2026-06-22") == []
+    assert store.due_auto_checkins("2026-06-23") == [("qq:10001", "session=abc")]
+    assert store.remove("qq:10001")
+    assert store.get_credential("qq:10001") is None
+
+    assert plugin_module.risingstones_credential_headers("session=abc") == {
+        "Cookie": "session=abc"
+    }
+    assert plugin_module.risingstones_credential_headers("Bearer abc") == {
+        "Authorization": "Bearer abc",
+        "X-Token": "abc",
+    }

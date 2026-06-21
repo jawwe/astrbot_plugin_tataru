@@ -9,9 +9,12 @@ import itertools
 import json
 import random
 import re
+import sqlite3
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from astrbot.api import logger
@@ -329,6 +332,8 @@ RISINGSTONES_API_BASE = "https://apiff14risingstones.web.sdo.com/api"
 RISINGSTONES_WEB_BASE = "https://ff14risingstones.web.sdo.com/pc/index.html"
 RISINGSTONES_DEFAULT_LIMIT = 10
 RISINGSTONES_MAX_LIMIT = 20
+RISINGSTONES_DB_PATH = DATA_DIR / "risingstones.sqlite3"
+RISINGSTONES_TIMEZONE = ZoneInfo("Asia/Shanghai")
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
 CN_WORLD_NAME_CACHE: dict[str, dict] | None = None
@@ -648,6 +653,94 @@ class RisingstonesRecruitQuery:
     keyword: str | None
     page: int
     limit: int
+
+
+class RisingstonesAccountStore:
+    """Small per-user SQLite store for private Rising Stones credentials."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS risingstones_accounts (
+                    account_key TEXT PRIMARY KEY,
+                    credential TEXT NOT NULL,
+                    auto_checkin INTEGER NOT NULL DEFAULT 0,
+                    last_checkin_date TEXT,
+                    last_attempt_date TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+    def set_credential(self, account_key: str, credential: str) -> None:
+        now = datetime.now(RISINGSTONES_TIMEZONE).isoformat(timespec="seconds")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO risingstones_accounts (account_key, credential, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(account_key) DO UPDATE SET
+                    credential = excluded.credential,
+                    updated_at = excluded.updated_at
+                """,
+                (account_key, credential, now),
+            )
+
+    def get_credential(self, account_key: str) -> str | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT credential FROM risingstones_accounts WHERE account_key = ?",
+                (account_key,),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def remove(self, account_key: str) -> bool:
+        with sqlite3.connect(self.path) as connection:
+            cursor = connection.execute(
+                "DELETE FROM risingstones_accounts WHERE account_key = ?",
+                (account_key,),
+            )
+        return cursor.rowcount > 0
+
+    def set_auto_checkin(self, account_key: str, enabled: bool) -> bool:
+        with sqlite3.connect(self.path) as connection:
+            cursor = connection.execute(
+                "UPDATE risingstones_accounts SET auto_checkin = ? WHERE account_key = ?",
+                (int(enabled), account_key),
+            )
+        return cursor.rowcount > 0
+
+    def due_auto_checkins(self, day: str) -> list[tuple[str, str]]:
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT account_key, credential
+                FROM risingstones_accounts
+                WHERE auto_checkin = 1
+                  AND (last_attempt_date IS NULL OR last_attempt_date != ?)
+                """,
+                (day,),
+            ).fetchall()
+        return [(str(account_key), str(credential)) for account_key, credential in rows]
+
+    def mark_attempt(self, account_key: str, day: str) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE risingstones_accounts SET last_attempt_date = ? WHERE account_key = ?",
+                (day, account_key),
+            )
+
+    def mark_checkin(self, account_key: str, day: str) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE risingstones_accounts SET last_checkin_date = ? WHERE account_key = ?",
+                (day, account_key),
+            )
 
 
 @dataclass
@@ -1512,6 +1605,8 @@ def create_help_text() -> str:
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
+[石之家 绑定 Cookie请求头或BearerToken] 私聊绑定石之家账号
+[石之家 签到/自动签到 开启/关闭/解绑] 私聊签到与账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -1888,6 +1983,91 @@ def format_risingstones_recruits(
             ]
         )
     return "\n".join(lines)
+
+
+def risingstones_credential_headers(credential: str) -> dict[str, str]:
+    """Build authenticated headers from a full Cookie header or a bearer token."""
+    value = credential.strip()
+    if value.lower().startswith("cookie:"):
+        value = value.split(":", 1)[1].strip()
+    if "=" in value:
+        return {"Cookie": value}
+    if value.lower().startswith("bearer "):
+        value = value.split(" ", 1)[1].strip()
+    return {"Authorization": f"Bearer {value}", "X-Token": value}
+
+
+def risingstones_account_key(event: AstrMessageEvent) -> str | None:
+    platform_id = str(event.get_platform_id() or "").strip()
+    sender_id = str(event.get_sender_id() or "").strip()
+    if not platform_id or not sender_id:
+        return None
+    return f"{platform_id}:{sender_id}"
+
+
+def is_risingstones_private_event(event: AstrMessageEvent) -> bool:
+    checker = getattr(event, "is_private_chat", None)
+    return bool(checker and checker())
+
+
+async def risingstones_account_request(
+    credential: str,
+    method: str,
+    endpoint: str,
+    *,
+    params: dict[str, str] | None = None,
+    data: dict[str, str] | None = None,
+) -> dict:
+    """Call a private Rising Stones endpoint using browser headers and credentials."""
+    query = f"?{urlencode(params)}" if params else ""
+    response = await aiohttp_request(
+        method,
+        f"{RISINGSTONES_API_BASE}{endpoint}{query}",
+        timeout_seconds=20,
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Referer": RISINGSTONES_WEB_BASE,
+            **risingstones_credential_headers(credential),
+        },
+        data=data,
+    )
+    if response.status != 200 or not isinstance(response.payload, dict):
+        raise RuntimeError(f"石之家请求失败: HTTP {response.status}")
+    payload = response.payload
+    if payload.get("code") not in {0, 10000, 10001}:
+        message = str(payload.get("msg") or "未知错误")
+        if (
+            payload.get("code") == 10403
+            or "登录" in message
+            or "token" in message.lower()
+        ):
+            raise RuntimeError("石之家凭据已失效，请在私聊中重新绑定")
+        raise RuntimeError(f"石之家接口返回异常: {message}")
+    return payload
+
+
+async def risingstones_verify_credential(credential: str) -> dict:
+    payload = await risingstones_account_request(
+        credential, "GET", "/home/userInfo/getUserInfo"
+    )
+    data = payload.get("data")
+    if not isinstance(data, dict) or not data.get("character_name"):
+        raise RuntimeError("石之家凭据有效，但账号未绑定角色")
+    return data
+
+
+async def risingstones_checkin(credential: str) -> tuple[bool, str]:
+    tempsuid = str(uuid.uuid4())
+    payload = await risingstones_account_request(
+        credential,
+        "POST",
+        "/home/sign/signIn",
+        params={"tempsuid": tempsuid},
+        data={"tempsuid": tempsuid},
+    )
+    if payload.get("code") == 10000:
+        return True, str(payload.get("msg") or "签到成功")
+    return True, str(payload.get("msg") or "今日已签到")
 
 
 def normalize_party_category(value: str | None) -> str | None:
@@ -5036,13 +5216,19 @@ class TataruPlugin(Star):
         self.tarot_dict: dict | None = None
         self.cache_dir = PLUGIN_DIR / ".cache"
         self.calendar_task: asyncio.Task | None = None
+        self.risingstones_checkin_task: asyncio.Task | None = None
+        self.risingstones_accounts = RisingstonesAccountStore(RISINGSTONES_DB_PATH)
         self.last_calendar_download_time: dict[str, datetime] = {}
 
     async def initialize(self):
         debug_log("plugin.initialize", version=PLUGIN_VERSION)
         self.tarot_dict = load_tarot()
         self.cache_dir.mkdir(exist_ok=True)
+        self.risingstones_accounts.initialize()
         self.calendar_task = asyncio.create_task(self.download_calendar_loop())
+        self.risingstones_checkin_task = asyncio.create_task(
+            self.risingstones_checkin_loop()
+        )
         logger.info("Tataru AstrBot plugin initialized.")
 
     def default_calendar_server(self) -> str:
@@ -5067,6 +5253,13 @@ class TataruPlugin(Star):
 
     def ffxiv_icon_font_path(self) -> str:
         return str(self.config.get("ffxiv_icon_font_path", "") or "").strip()
+
+    def risingstones_checkin_hour(self) -> int:
+        try:
+            hour = int(self.config.get("risingstones_checkin_hour", 8))
+        except (TypeError, ValueError):
+            hour = 8
+        return hour if 0 <= hour <= 23 else 8
 
     def render_text_image(
         self, text: str, output_path: Path, width_now: int = 20
@@ -5133,6 +5326,10 @@ class TataruPlugin(Star):
     async def risingstones_posts(self, event: AstrMessageEvent):
         """查询石之家公开内容和招募。"""
         raw_query = command_args(event.message_str, "石之家")
+        private_result = await self.risingstones_private_action(event, raw_query)
+        if private_result is not None:
+            yield event.plain_result(private_result)
+            return
         if raw_query.split(maxsplit=1)[:1] == ["招募"]:
             query = parse_risingstones_recruit_query(
                 raw_query.removeprefix("招募").strip()
@@ -5173,6 +5370,72 @@ class TataruPlugin(Star):
             )
             return
         yield event.plain_result(format_risingstones_posts(query, rows))
+
+    async def risingstones_private_action(
+        self, event: AstrMessageEvent, raw_query: str
+    ) -> str | None:
+        """Handle private credential and check-in operations without exposing secrets."""
+        action, _, argument = raw_query.partition(" ")
+        action = action.strip()
+        argument = argument.strip()
+        if action not in {"绑定", "解绑", "签到", "自动签到"}:
+            return None
+        if not is_risingstones_private_event(event):
+            return "石之家账号绑定、签到和自动签到仅支持私聊使用。"
+        account_key = risingstones_account_key(event)
+        if not account_key:
+            return "无法识别当前私聊账号，请更换平台后重试。"
+
+        if action == "绑定":
+            credential = argument.removeprefix("Cookie:").strip()
+            if not credential:
+                return "绑定格式：石之家 绑定 Cookie 请求头或 Bearer Token"
+            try:
+                profile = await risingstones_verify_credential(credential)
+            except Exception as exc:
+                logger.warning(f"石之家凭据验证失败: {exc}")
+                return "石之家凭据验证失败，请确认 Cookie 请求头或 Token 仍然有效。"
+            self.risingstones_accounts.set_credential(account_key, credential)
+            character_name = str(profile.get("character_name") or "已绑定角色")
+            server = "@".join(
+                part
+                for part in (
+                    str(profile.get("area_name") or "").strip(),
+                    str(profile.get("group_name") or "").strip(),
+                )
+                if part
+            )
+            return (
+                f"石之家账号已绑定：{character_name}{f' @ {server}' if server else ''}"
+            )
+
+        if action == "解绑":
+            self.risingstones_accounts.remove(account_key)
+            return "石之家账号凭据和自动签到设置已移除。"
+
+        credential = self.risingstones_accounts.get_credential(account_key)
+        if not credential:
+            return "尚未绑定石之家账号，请先在私聊发送：石之家 绑定 Cookie 请求头或 Bearer Token"
+
+        if action == "自动签到":
+            enabled = argument in {"开启", "开", "on", "ON"}
+            disabled = argument in {"关闭", "关", "off", "OFF"}
+            if not enabled and not disabled:
+                return "自动签到格式：石之家 自动签到 开启 或 石之家 自动签到 关闭"
+            self.risingstones_accounts.set_auto_checkin(account_key, enabled)
+            if enabled:
+                return f"石之家自动签到已开启，将在每日 {self.risingstones_checkin_hour():02d}:00 后执行。"
+            return "石之家自动签到已关闭。"
+
+        try:
+            _, message = await risingstones_checkin(credential)
+        except Exception as exc:
+            logger.warning(f"石之家手动签到失败: {exc}")
+            return "石之家签到失败，请检查凭据是否过期后重新绑定。"
+        day = datetime.now(RISINGSTONES_TIMEZONE).date().isoformat()
+        self.risingstones_accounts.mark_attempt(account_key, day)
+        self.risingstones_accounts.mark_checkin(account_key, day)
+        return f"石之家签到结果：{message}"
 
     @filter.command("招募")
     @debug_command("招募")
@@ -5406,6 +5669,41 @@ class TataruPlugin(Star):
             except Exception as exc:
                 logger.warning(f"日历更新连接错误: {exc}")
             await asyncio.sleep(60 * 60)
+
+    async def risingstones_checkin_loop(self):
+        """Run opted-in private account check-ins once per Shanghai calendar day."""
+        while True:
+            try:
+                now = datetime.now(RISINGSTONES_TIMEZONE)
+                if now.hour == self.risingstones_checkin_hour():
+                    day = now.date().isoformat()
+                    accounts = self.risingstones_accounts.due_auto_checkins(day)
+                    for account_key, credential in accounts:
+                        self.risingstones_accounts.mark_attempt(account_key, day)
+                        try:
+                            _, message = await risingstones_checkin(credential)
+                            self.risingstones_accounts.mark_checkin(account_key, day)
+                            debug_log(
+                                "risingstones.auto_checkin.success",
+                                account_key=account_key,
+                                message=message,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "石之家自动签到失败: %s (%s)",
+                                account_key,
+                                type(exc).__name__,
+                            )
+                            debug_log(
+                                "risingstones.auto_checkin.error",
+                                account_key=account_key,
+                                error_type=type(exc).__name__,
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"石之家自动签到任务异常: {exc}")
+            await asyncio.sleep(60)
 
     def calendar_cache_path(self, server: str) -> Path:
         return (
