@@ -1,10 +1,10 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.11-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.12-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
-面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
+面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
 
 ## 功能特性
 
@@ -18,6 +18,7 @@
 | `仙人彩` | 随机给出 3 组仙人彩号码 | 文本 |
 | `日历` | 查询国服 / 国际服活动日历 | 文本 |
 | `攻略` | 查询副本攻略 | 图片 / 文本 |
+| `石之家` | 查询石之家公开帖子和攻略 | 文本 |
 | `招募` | 查询 FF14 国服招募板 | 图片 |
 | `看看微博` | 查询 FF14 官方微博最新消息 | 文本 |
 | `物品` | 查询物品基础信息和获取方式 | 图标 + 图片 |
@@ -76,6 +77,16 @@ https://github.com/jawwe/astrbot_plugin_tataru
 攻略 副本等级 副本名
 攻略 副本名 文本
 ```
+
+### 石之家
+
+```text
+石之家
+石之家 帖子 幻化 5
+石之家 攻略 零式 10
+```
+
+默认查询最新帖子。可指定 `帖子` 或 `攻略`，再附加关键词和数量；默认 `10` 条，最多 `20` 条。
 
 ### 招募
 
@@ -212,6 +223,7 @@ astrbot_plugin_tataru/
 - [Universalis](https://docs.universalis.app/)：市场板物价 API 数据源。
 - [艾欧泽亚售楼中心](https://house.ffxiv.cyou/)：房屋空房 API 数据源。
 - [FF14.org](https://ff14.org/duty)：副本攻略数据源。
+- [石之家](https://ff14risingstones.web.sdo.com/pc/index.html)：国服社区帖子和攻略数据源。
 - [Google Calendar](https://calendar.google.com/)：活动日历主数据源。
 - [iCloud Calendar](https://www.icloud.com/calendar/)：活动日历备用数据源。
 - [微博](https://weibo.com/1797798792)：FF14 官方微博数据源。

@@ -325,6 +325,10 @@ PARTY_FINDER_API_V1_URL = "https://xivpf.littlenightmare.top/api/listings"
 PARTY_FINDER_API_V2_URL = "https://xivpf.littlenightmare.top/api/v2/listings"
 XIVAPI_BASE_URL = "https://xivapi-v2.xivcdn.com/api"
 HOUSE_API_URL = "https://house.ffxiv.cyou/api/sales"
+RISINGSTONES_API_BASE = "https://apiff14risingstones.web.sdo.com/api"
+RISINGSTONES_WEB_BASE = "https://ff14risingstones.web.sdo.com/pc/index.html"
+RISINGSTONES_DEFAULT_LIMIT = 10
+RISINGSTONES_MAX_LIMIT = 20
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
 CN_WORLD_NAME_CACHE: dict[str, dict] | None = None
@@ -627,6 +631,14 @@ class HouseQuery:
     size_name: str | None
     ward: int | None
     plot_id: int | None
+    limit: int
+
+
+@dataclass
+class RisingstonesPostsQuery:
+    kind: str
+    keyword: str | None
+    page: int
     limit: int
 
 
@@ -1491,6 +1503,7 @@ def create_help_text() -> str:
 [仙人彩] 帮你选每周仙人仙彩数字
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
+[石之家 (帖子/攻略) (关键词) (数量)] 查石之家公开内容
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -1572,6 +1585,122 @@ def strip_html(text: str) -> str:
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = re.sub(r"<.*?>", "", text)
     return html.unescape(text).strip()
+
+
+def parse_risingstones_posts_query(value: str) -> RisingstonesPostsQuery:
+    """Parse the public Rising Stones post and strategy lookup syntax."""
+    parts = value.split()
+    kind = "post"
+    if parts:
+        kind_aliases = {
+            "帖子": "post",
+            "社区": "post",
+            "post": "post",
+            "攻略": "strat",
+            "战略": "strat",
+            "strat": "strat",
+        }
+        resolved_kind = kind_aliases.get(parts[0].lower())
+        if resolved_kind:
+            kind = resolved_kind
+            parts = parts[1:]
+
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    keyword = " ".join(parts).strip() or None
+    return RisingstonesPostsQuery(kind=kind, keyword=keyword, page=1, limit=limit)
+
+
+def risingstones_content_url(kind: str, post_id: object) -> str:
+    route = "strat" if kind == "strat" else "post"
+    return f"{RISINGSTONES_WEB_BASE}#/{route}/detail/{quote(str(post_id or ''))}"
+
+
+async def fetch_risingstones_posts(query: RisingstonesPostsQuery) -> list[dict]:
+    """Fetch public Rising Stones posts using the website's browser request shape."""
+    content_type = "2" if query.kind == "strat" else "1"
+    if query.keyword:
+        endpoint = "/common/search"
+        params = {
+            "type": content_type,
+            "keywords": query.keyword,
+            "page": query.page,
+            "limit": query.limit,
+            "part_id": "",
+            "orderBy": "comment",
+            "pageTime": "",
+        }
+    else:
+        endpoint = "/home/posts/postsList"
+        params = {
+            "type": content_type,
+            "page": query.page,
+            "limit": query.limit,
+            "is_top": "0",
+            "is_refine": "0",
+            "part_id": "",
+            "hotType": "postsHotNow" if query.kind == "post" else "",
+            "order": "",
+        }
+    response = await aiohttp_request(
+        "GET",
+        f"{RISINGSTONES_API_BASE}{endpoint}?{urlencode(params)}",
+        timeout_seconds=20,
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Referer": RISINGSTONES_WEB_BASE,
+        },
+    )
+    if response.status != 200 or not isinstance(response.payload, dict):
+        raise RuntimeError(f"石之家请求失败: HTTP {response.status}")
+    payload = response.payload
+    if payload.get("code") not in {0, 10000}:
+        raise RuntimeError(f"石之家接口返回异常: {payload.get('msg') or '未知错误'}")
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    return (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+
+
+def risingstones_number(value: object) -> int | None:
+    try:
+        return int(value) if value not in {None, ""} else None
+    except (TypeError, ValueError):
+        return None
+
+
+def format_risingstones_posts(query: RisingstonesPostsQuery, rows: list[dict]) -> str:
+    """Format public community content as a bounded chat response."""
+    kind_label = "攻略" if query.kind == "strat" else "帖子"
+    keyword_label = f" 关键词：{query.keyword}" if query.keyword else ""
+    lines = [f"【石之家{kind_label}】{keyword_label} 数量：{len(rows)}"]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        post_id = row.get("posts_id") or row.get("id")
+        title = str(row.get("title") or "未命名内容").strip()
+        category = str(row.get("part_name") or "未分类").strip()
+        author = str(row.get("character_name") or "未知作者").strip()
+        server = str(row.get("area_name") or "未知服务器").strip()
+        created_at = str(row.get("created_at") or "未知时间").strip()
+        metrics = []
+        for label, field in (
+            ("浏览", "read_count"),
+            ("评论", "comment_count"),
+            ("点赞", "like_count"),
+        ):
+            number = risingstones_number(row.get(field))
+            if number is not None:
+                metrics.append(f"{label}：{number}")
+        lines.extend(
+            [
+                f"\n{index:02d}. {title}",
+                f"[{category}] {author} @ {server}",
+                " | ".join([*metrics, created_at]),
+                risingstones_content_url(query.kind, post_id),
+            ]
+        )
+    return "\n".join(lines)
 
 
 def normalize_party_category(value: str | None) -> str | None:
@@ -4811,6 +4940,28 @@ class TataruPlugin(Star):
         image_path = self.cache_dir / "dungeon_note.jpg"
         self.render_text_image(result_text, image_path, width_now=25)
         yield event.image_result(str(image_path))
+
+    @filter.command("石之家")
+    @debug_command("石之家")
+    async def risingstones_posts(self, event: AstrMessageEvent):
+        """查询石之家公开帖子与攻略。"""
+        query = parse_risingstones_posts_query(
+            command_args(event.message_str, "石之家")
+        )
+        try:
+            rows = await fetch_risingstones_posts(query)
+        except Exception as exc:
+            logger.warning(f"石之家内容查询失败: {exc}")
+            yield event.plain_result("石之家内容查询失败，请稍后再试")
+            return
+        if not rows:
+            kind_label = "攻略" if query.kind == "strat" else "帖子"
+            keyword_label = f"「{query.keyword}」" if query.keyword else "当前条件"
+            yield event.plain_result(
+                f"石之家{kind_label}中没有找到{keyword_label}的内容"
+            )
+            return
+        yield event.plain_result(format_risingstones_posts(query, rows))
 
     @filter.command("招募")
     @debug_command("招募")

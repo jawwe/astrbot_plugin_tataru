@@ -105,3 +105,31 @@ def test_proxy_host_rejects_embedded_port(plugin_module) -> None:
         }
     )
     assert plugin_module.proxy_request_options()["proxy"] == "http://[::1]:7890"
+
+
+def test_risingstones_posts_query_and_formatting(plugin_module) -> None:
+    """Keep public Rising Stones content lookups bounded and human-readable."""
+    query = plugin_module.parse_risingstones_posts_query("攻略 零式 99")
+    assert query.kind == "strat"
+    assert query.keyword == "零式"
+    assert query.limit == 20
+
+    text = plugin_module.format_risingstones_posts(
+        query,
+        [
+            {
+                "posts_id": 123,
+                "title": "零式攻略",
+                "part_name": "攻略",
+                "character_name": "塔塔露",
+                "area_name": "海猫茶屋",
+                "read_count": 120,
+                "comment_count": 4,
+                "like_count": 9,
+                "created_at": "2026-06-22 12:00:00",
+            }
+        ],
+    )
+    assert "【石之家攻略】 关键词：零式 数量：1" in text
+    assert "浏览：120 | 评论：4 | 点赞：9" in text
+    assert "#/strat/detail/123" in text
