@@ -1606,7 +1606,7 @@ def create_help_text() -> str:
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
 [石之家 绑定 Cookie请求头或BearerToken] 私聊绑定石之家账号
-[石之家 签到/自动签到 开启/关闭/解绑] 私聊签到与账号管理
+[石之家 我的/通知/签到/自动签到 开启/关闭/解绑] 私聊账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -2068,6 +2068,68 @@ async def risingstones_checkin(credential: str) -> tuple[bool, str]:
     if payload.get("code") == 10000:
         return True, str(payload.get("msg") or "签到成功")
     return True, str(payload.get("msg") or "今日已签到")
+
+
+def format_risingstones_profile(data: dict) -> str:
+    """Format the currently bound Rising Stones character profile."""
+    character_name = str(data.get("character_name") or "未知角色").strip()
+    server = "@".join(
+        part
+        for part in (
+            str(data.get("area_name") or "").strip(),
+            str(data.get("group_name") or "").strip(),
+        )
+        if part
+    )
+    details = data.get("characterDetail")
+    detail = details[0] if isinstance(details, list) and details else {}
+    follows = (
+        data.get("followFansiNum")
+        if isinstance(data.get("followFansiNum"), dict)
+        else {}
+    )
+    lines = [f"【石之家档案】{character_name}{f' @ {server}' if server else ''}"]
+    metrics = (
+        ("经验", data.get("experience")),
+        ("关注", follows.get("followNum")),
+        ("粉丝", follows.get("fansNum")),
+        ("获赞", data.get("beLikedNum")),
+    )
+    lines.extend(
+        f"{label}：{value}" for label, value in metrics if value not in {None, ""}
+    )
+    for label, field in (
+        ("创建时间", "create_time"),
+        ("上次登录", "last_login_time"),
+        ("游戏时长", "play_time"),
+    ):
+        value = detail.get(field) if isinstance(detail, dict) else None
+        if value not in {None, ""}:
+            lines.append(f"{label}：{value}")
+    return "\n".join(lines)
+
+
+RISINGSTONES_NOTIFICATION_FIELDS = (
+    ("系统消息", "sysNum"),
+    ("@ 我的", "atMsgNum"),
+    ("评论", "commentMsgNum"),
+    ("赞和收藏", "beLikedMsgNum"),
+    ("我的招募", "recruitTip"),
+    ("副本招募", "recruitFbTip"),
+    ("部队招待", "recruitGuildTip"),
+    ("萌新招待", "recruitNeTip"),
+    ("其他招募", "recruitOtherTip"),
+    ("新粉丝", "newFensNum"),
+)
+
+
+def format_risingstones_notifications(data: dict) -> str:
+    """Format known unread counters while retaining unknown values safely."""
+    lines = ["【石之家通知】"]
+    for label, field in RISINGSTONES_NOTIFICATION_FIELDS:
+        number = risingstones_number(data.get(field)) or 0
+        lines.append(f"{label}：{number}")
+    return "\n".join(lines)
 
 
 def normalize_party_category(value: str | None) -> str | None:
@@ -5378,7 +5440,7 @@ class TataruPlugin(Star):
         action, _, argument = raw_query.partition(" ")
         action = action.strip()
         argument = argument.strip()
-        if action not in {"绑定", "解绑", "签到", "自动签到"}:
+        if action not in {"绑定", "解绑", "签到", "自动签到", "我的", "通知"}:
             return None
         if not is_risingstones_private_event(event):
             return "石之家账号绑定、签到和自动签到仅支持私聊使用。"
@@ -5416,6 +5478,36 @@ class TataruPlugin(Star):
         credential = self.risingstones_accounts.get_credential(account_key)
         if not credential:
             return "尚未绑定石之家账号，请先在私聊发送：石之家 绑定 Cookie 请求头或 Bearer Token"
+
+        if action == "我的":
+            try:
+                payload = await risingstones_account_request(
+                    credential, "GET", "/home/userInfo/getUserInfo"
+                )
+            except Exception as exc:
+                logger.warning(f"石之家档案查询失败: {exc}")
+                return "石之家档案查询失败，请检查凭据是否过期后重新绑定。"
+            data = payload.get("data")
+            return (
+                format_risingstones_profile(data)
+                if isinstance(data, dict)
+                else "石之家档案为空，请稍后再试。"
+            )
+
+        if action == "通知":
+            try:
+                payload = await risingstones_account_request(
+                    credential, "GET", "/home/sysMsg/getTip"
+                )
+            except Exception as exc:
+                logger.warning(f"石之家通知查询失败: {exc}")
+                return "石之家通知查询失败，请检查凭据是否过期后重新绑定。"
+            data = payload.get("data")
+            return (
+                format_risingstones_notifications(data)
+                if isinstance(data, dict)
+                else "石之家通知为空，请稍后再试。"
+            )
 
         if action == "自动签到":
             enabled = argument in {"开启", "开", "on", "ON"}

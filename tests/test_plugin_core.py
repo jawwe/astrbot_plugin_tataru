@@ -188,3 +188,27 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
         "Authorization": "Bearer abc",
         "X-Token": "abc",
     }
+
+
+def test_risingstones_private_response_formatting(plugin_module) -> None:
+    """Render private profile and notification payloads without raw identifiers."""
+    profile = plugin_module.format_risingstones_profile(
+        {
+            "character_name": "塔塔露",
+            "area_name": "陆行鸟",
+            "group_name": "红玉海",
+            "experience": 120,
+            "followFansiNum": {"followNum": 3, "fansNum": 4},
+            "beLikedNum": 5,
+            "characterDetail": [{"play_time": "100小时"}],
+        }
+    )
+    assert "【石之家档案】塔塔露 @ 陆行鸟@红玉海" in profile
+    assert "游戏时长：100小时" in profile
+
+    notifications = plugin_module.format_risingstones_notifications(
+        {"sysNum": "2", "commentMsgNum": 1, "newFensNum": 3}
+    )
+    assert "系统消息：2" in notifications
+    assert "评论：1" in notifications
+    assert "新粉丝：3" in notifications
