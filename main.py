@@ -2941,8 +2941,9 @@ def log_fflogs_statistics_page_diagnostics(page: str, job: dict) -> None:
     logger.info(
         f"FFLogs statistics main-table-number td samples: {fflogs_debug_td_samples(decoded, r'main-table-number')}"
     )
+    primary_pattern = r"\bprimary\b"
     logger.info(
-        f"FFLogs statistics primary td samples: {fflogs_debug_td_samples(decoded, r'\\bprimary\\b')}"
+        f"FFLogs statistics primary td samples: {fflogs_debug_td_samples(decoded, primary_pattern)}"
     )
     logger.info(
         f"FFLogs statistics script src sample: {fflogs_debug_script_sources(decoded)}"
