@@ -212,3 +212,15 @@ def test_risingstones_private_response_formatting(plugin_module) -> None:
     assert "系统消息：2" in notifications
     assert "评论：1" in notifications
     assert "新粉丝：3" in notifications
+
+
+def test_risingstones_statistics_formatting(plugin_module) -> None:
+    """Only verified statistic fields should be included in summary output."""
+    assert plugin_module.parse_risingstones_stat_kind("零式") == "savage"
+    assert plugin_module.risingstones_stat_lines(
+        "savage", {"territory_num": 4, "enter_num": 10, "finish_times": 2}
+    ) == ["已记录副本数：4个", "进入次数：10次", "完成次数：2次"]
+    text = plugin_module.format_risingstones_statistics(
+        {"savage": ["已记录副本数：4个"]}
+    )
+    assert "[零式数据]" in text

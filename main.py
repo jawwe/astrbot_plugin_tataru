@@ -1606,7 +1606,7 @@ def create_help_text() -> str:
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
 [石之家 绑定 Cookie请求头或BearerToken] 私聊绑定石之家账号
-[石之家 我的/通知/签到/自动签到 开启/关闭/解绑] 私聊账号管理
+[石之家 我的/通知/统计/签到/自动签到 开启/关闭/解绑] 私聊账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -2121,6 +2121,155 @@ RISINGSTONES_NOTIFICATION_FIELDS = (
     ("其他招募", "recruitOtherTip"),
     ("新粉丝", "newFensNum"),
 )
+
+RISINGSTONES_STAT_KIND_ALIASES = {
+    "全部": "all",
+    "all": "all",
+    "战场": "frontline",
+    "frontline": "frontline",
+    "绝境": "ultimate",
+    "ultimate": "ultimate",
+    "钓鱼": "fishing",
+    "fishing": "fishing",
+    "零式": "savage",
+    "savage": "savage",
+    "幻化": "glamour",
+    "glamour": "glamour",
+    "蜃景": "occult",
+    "occult": "occult",
+    "深层": "deepdungeon",
+    "深层迷宫": "deepdungeon",
+    "deepdungeon": "deepdungeon",
+}
+RISINGSTONES_STAT_LABELS = {
+    "frontline": "战场数据",
+    "ultimate": "绝境战数据",
+    "fishing": "钓鱼数据",
+    "savage": "零式数据",
+    "glamour": "幻化/武具投影数据",
+    "occult": "蜃景幻界数据",
+    "deepdungeon": "深层迷宫数据",
+}
+
+
+def parse_risingstones_stat_kind(value: str) -> str:
+    return RISINGSTONES_STAT_KIND_ALIASES.get(value.strip().lower(), "all")
+
+
+def risingstones_first_data_row(data: object) -> dict | None:
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        return next((item for item in data if isinstance(item, dict)), None)
+    return None
+
+
+def risingstones_stat_lines(kind: str, data: object) -> list[str]:
+    """Normalize the verified statistic summary fields without inventing values."""
+    row = risingstones_first_data_row(data)
+    if kind == "ultimate" and isinstance(data, list):
+        lines = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            territory = str(
+                item.get("territory_name") or item.get("territory_type") or "绝境战"
+            )
+            clear_times = item.get("clear_times")
+            dead_times = item.get("dead_times")
+            job_name = item.get("job_name")
+            parts = [f"通关：{clear_times}" if clear_times not in {None, ""} else ""]
+            if dead_times not in {None, ""}:
+                parts.append(f"倒地：{dead_times}")
+            if job_name:
+                parts.append(str(job_name))
+            if parts:
+                lines.append(f"{territory}：{' | '.join(parts)}")
+        return lines
+    if not row:
+        return []
+
+    fields = {
+        "frontline": (
+            ("参战次数", "fight_times", "次"),
+            ("胜利次数", "win_times", "次"),
+            ("胜率", "win_rate", "%"),
+            ("KDA", "kda", ""),
+            ("击倒数", "kill_times", "次"),
+            ("助攻数", "assist_times", "次"),
+            ("倒地数", "dead_times", "次"),
+        ),
+        "fishing": (
+            ("钓鱼次数", "total_times", "次"),
+            ("成功率", "succ_rate", "%"),
+            ("出海次数", "sea_times", "次"),
+            ("最高出海分数", "max_sea_score", "分"),
+        ),
+        "savage": (
+            ("已记录副本数", "territory_num", "个"),
+            ("进入次数", "enter_num", "次"),
+            ("完成次数", "finish_times", "次"),
+            ("累计耗时", "elapsed_time", "分钟"),
+        ),
+        "glamour": (
+            ("使用幻想药次数", "washing_num", "次"),
+            ("已套装幻影化数量", "set_num", "套"),
+            ("装备使用染剂数", "color_times", "种"),
+            ("武具投影次数", "vanity_times", "次"),
+        ),
+        "occult": (
+            ("当前等级", "now_level", "级"),
+            ("FATE 完成次数", "fate_times", "次"),
+            ("CE 完成次数", "ce_times", "次"),
+        ),
+        "deepdungeon": (
+            ("通关次数", "clear_times", "次"),
+            ("魔器武器等级", "weapon_level", ""),
+            ("魔器防具等级", "armor_level", ""),
+            ("强化等级", "enchantedLevel", ""),
+        ),
+    }
+    return [
+        f"{label}：{row[field]}{unit}"
+        for label, field, unit in fields.get(kind, ())
+        if row.get(field) not in {None, ""}
+    ]
+
+
+async def risingstones_statistics(credential: str, kind: str) -> dict[str, list[str]]:
+    endpoints = {
+        "frontline": ("/home/dataCenter/frontline1TotalNew", None),
+        "ultimate": ("/home/dataCenter/gaoNanFirst1", None),
+        "fishing": ("/home/dataCenter/fishTotal1", None),
+        "savage": ("/home/dataCenter/getLingShiTotal", None),
+        "glamour": ("/home/dataCenter/getDressTotal7", None),
+        "occult": ("/home/dataCenter/getMKDTotal1", None),
+        "deepdungeon": ("/home/dataCenter/getDDTerr1", {"dd_type": "dd4"}),
+    }
+    kinds = list(endpoints) if kind == "all" else [kind]
+    result: dict[str, list[str]] = {}
+    for current_kind in kinds:
+        endpoint, params = endpoints[current_kind]
+        try:
+            payload = await risingstones_account_request(
+                credential, "GET", endpoint, params=params
+            )
+        except RuntimeError:
+            if kind != "all":
+                raise
+            continue
+        lines = risingstones_stat_lines(current_kind, payload.get("data"))
+        if lines:
+            result[current_kind] = lines
+    return result
+
+
+def format_risingstones_statistics(statistics: dict[str, list[str]]) -> str:
+    lines = ["【石之家统计】"]
+    for kind, values in statistics.items():
+        lines.append(f"\n[{RISINGSTONES_STAT_LABELS[kind]}]")
+        lines.extend(values)
+    return "\n".join(lines)
 
 
 def format_risingstones_notifications(data: dict) -> str:
@@ -5440,7 +5589,15 @@ class TataruPlugin(Star):
         action, _, argument = raw_query.partition(" ")
         action = action.strip()
         argument = argument.strip()
-        if action not in {"绑定", "解绑", "签到", "自动签到", "我的", "通知"}:
+        if action not in {
+            "绑定",
+            "解绑",
+            "签到",
+            "自动签到",
+            "我的",
+            "通知",
+            "统计",
+        }:
             return None
         if not is_risingstones_private_event(event):
             return "石之家账号绑定、签到和自动签到仅支持私聊使用。"
@@ -5508,6 +5665,17 @@ class TataruPlugin(Star):
                 if isinstance(data, dict)
                 else "石之家通知为空，请稍后再试。"
             )
+
+        if action == "统计":
+            kind = parse_risingstones_stat_kind(argument)
+            try:
+                statistics = await risingstones_statistics(credential, kind)
+            except Exception as exc:
+                logger.warning(f"石之家统计查询失败: {exc}")
+                return "石之家统计查询失败，请检查凭据是否过期后重新绑定。"
+            if not statistics:
+                return "当前绑定角色没有可用的石之家统计记录。"
+            return format_risingstones_statistics(statistics)
 
         if action == "自动签到":
             enabled = argument in {"开启", "开", "on", "ON"}

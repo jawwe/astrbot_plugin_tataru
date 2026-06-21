@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.15-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.16-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -103,6 +103,9 @@ https://github.com/jawwe/astrbot_plugin_tataru
 石之家 绑定 Bearer Token
 石之家 我的
 石之家 通知
+石之家 统计
+石之家 统计 零式
+石之家 统计 深层
 石之家 签到
 石之家 自动签到 开启
 石之家 自动签到 关闭
@@ -112,6 +115,8 @@ https://github.com/jawwe/astrbot_plugin_tataru
 绑定会先验证账号是否已绑定角色。自动签到默认关闭；开启后，插件会在 `Asia/Shanghai` 时区的配置时点执行，每个账号每天最多尝试一次。
 
 `石之家 我的` 返回当前绑定角色档案；`石之家 通知` 返回系统、评论、招募和粉丝等未读计数。
+
+`石之家 统计` 默认汇总当前角色有记录的战场、绝境、钓鱼、零式、幻化、蜃景幻界和深层迷宫数据。可指定 `战场`、`绝境`、`钓鱼`、`零式`、`幻化`、`蜃景` 或 `深层` 查询单项。
 
 ### 招募
 
