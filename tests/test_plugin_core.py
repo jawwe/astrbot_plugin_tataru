@@ -73,3 +73,35 @@ def test_proxy_settings_require_complete_authentication(plugin_module) -> None:
     )
     with pytest.raises(plugin_module.ProxyConfigurationError):
         plugin_module.proxy_request_options()
+
+
+def test_proxy_host_rejects_embedded_port(plugin_module) -> None:
+    """Reject host:port input while preserving valid IPv6 proxy hosts."""
+    plugin_module.configure_network_settings(
+        {
+            "proxy_enabled": True,
+            "proxy_host": "127.0.0.1:7890",
+            "proxy_port": 7890,
+        }
+    )
+    with pytest.raises(plugin_module.ProxyConfigurationError):
+        plugin_module.proxy_request_options()
+
+    plugin_module.configure_network_settings(
+        {
+            "proxy_enabled": True,
+            "proxy_host": "127.0.0.1:abc",
+            "proxy_port": 7890,
+        }
+    )
+    with pytest.raises(plugin_module.ProxyConfigurationError):
+        plugin_module.proxy_request_options()
+
+    plugin_module.configure_network_settings(
+        {
+            "proxy_enabled": True,
+            "proxy_host": "::1",
+            "proxy_port": 7890,
+        }
+    )
+    assert plugin_module.proxy_request_options()["proxy"] == "http://[::1]:7890"
