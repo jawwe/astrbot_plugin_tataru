@@ -662,6 +662,13 @@ class RisingstonesGlamourQuery:
     limit: int
 
 
+@dataclass
+class RisingstonesGuildQuery:
+    mode: str
+    value: str | None
+    limit: int
+
+
 class RisingstonesAccountStore:
     """Small per-user SQLite store for private Rising Stones credentials."""
 
@@ -1613,7 +1620,7 @@ def create_help_text() -> str:
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
 [石之家 绑定 Cookie请求头或BearerToken] 私聊绑定石之家账号
-[石之家 我的/通知/统计/幻化/签到/自动签到 开启/关闭/解绑] 私聊账号管理
+[石之家 我的/通知/统计/幻化/部队/签到/自动签到 开启/关闭/解绑] 私聊账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -2424,6 +2431,110 @@ def format_risingstones_glamour(
             ]
         )
     return "\n".join(line for line in lines if line != "")
+
+
+def parse_risingstones_guild_query(value: str) -> RisingstonesGuildQuery:
+    parts = value.split()
+    mode = "list"
+    if parts and parts[0] in {"详情", "detail"}:
+        mode = "detail"
+        parts = parts[1:]
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if mode != "detail" and parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    return RisingstonesGuildQuery(
+        mode=mode, value=" ".join(parts).strip() or None, limit=limit
+    )
+
+
+async def risingstones_guild_rows(
+    credential: str, query: RisingstonesGuildQuery
+) -> list[dict]:
+    if query.mode == "detail":
+        if not query.value or not query.value.isdigit():
+            raise ValueError("部队详情需要数字 ID")
+        payload = await risingstones_account_request(
+            credential,
+            "GET",
+            "/home/recruit/getRecruitGuildDetail",
+            params={"id": query.value},
+        )
+        data = payload.get("data")
+        return [data] if isinstance(data, dict) else []
+
+    params = {"page": "1", "limit": str(query.limit)}
+    if query.value:
+        params["guild_name"] = query.value
+    payload = await risingstones_account_request(
+        credential, "GET", "/home/recruit/recruitGuildList", params=params
+    )
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    return (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+
+
+def risingstones_guild_url(guild_id: object) -> str:
+    return f"{RISINGSTONES_WEB_BASE}#/recruit/guild/detail/{quote(str(guild_id or ''))}"
+
+
+def format_risingstones_guilds(query: RisingstonesGuildQuery, rows: list[dict]) -> str:
+    label = "详情" if query.mode == "detail" else "招待"
+    lines = [f"【石之家部队{label}】数量：{len(rows)}"]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        title = str(row.get("guild_name") or row.get("title") or "未命名部队").strip()
+        author = str(row.get("character_name") or "未知发布者").strip()
+        server = "@".join(
+            part
+            for part in (
+                str(row.get("area_name") or "").strip(),
+                str(row.get("group_name") or "").strip(),
+            )
+            if part
+        )
+        target_server = "@".join(
+            part
+            for part in (
+                str(row.get("target_area_name") or "").strip(),
+                str(row.get("target_group_name") or "").strip(),
+            )
+            if part
+        )
+        labels = [
+            str(item.get("name")).strip()
+            for item in row.get("labelInfo", [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+        schedule = " / ".join(
+            text
+            for text in (
+                str(row.get("weekday_time") or "").strip(),
+                str(row.get("weekend_time") or "").strip(),
+            )
+            if text
+        )
+        description = strip_html(
+            str(row.get("detail_mask") or row.get("guild_address") or "")
+        )
+        details = [
+            f"目标：{target_server}" if target_server else "",
+            f"标签：{'、'.join(labels)}" if labels else "",
+            f"活跃人数：{row['active_member_num']}"
+            if row.get("active_member_num")
+            else "",
+            schedule,
+        ]
+        lines.extend(
+            [
+                f"\n{index:02d}. {title}",
+                f"{author}{f' @ {server}' if server else ''}",
+                " | ".join(detail for detail in details if detail),
+                description[:500] if description else "暂无说明",
+                risingstones_guild_url(row.get("id")),
+            ]
+        )
+    return "\n".join(lines)
 
 
 def format_risingstones_notifications(data: dict) -> str:
@@ -5752,6 +5863,7 @@ class TataruPlugin(Star):
             "通知",
             "统计",
             "幻化",
+            "部队",
         }:
             return None
         if not is_risingstones_private_event(event):
@@ -5844,6 +5956,19 @@ class TataruPlugin(Star):
             if not rows:
                 return "没有找到符合条件的石之家幻化投稿。"
             return format_risingstones_glamour(query, rows)
+
+        if action == "部队":
+            query = parse_risingstones_guild_query(argument)
+            try:
+                rows = await risingstones_guild_rows(credential, query)
+            except ValueError as exc:
+                return str(exc)
+            except Exception as exc:
+                logger.warning(f"石之家部队招待查询失败: {exc}")
+                return "石之家部队招待查询失败，请检查凭据是否过期后重新绑定。"
+            if not rows:
+                return "没有找到符合条件的石之家部队招待。"
+            return format_risingstones_guilds(query, rows)
 
         if action == "自动签到":
             enabled = argument in {"开启", "开", "on", "ON"}

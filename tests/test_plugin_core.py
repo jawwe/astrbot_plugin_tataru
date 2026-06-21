@@ -255,3 +255,36 @@ def test_risingstones_glamour_query_and_formatting(plugin_module) -> None:
     assert "【石之家幻化】装备检索 数量：1" in text
     assert "点赞：12 | 收藏：3" in text
     assert "#/glamour/detail/265250" in text
+
+
+def test_risingstones_guild_query_and_formatting(plugin_module) -> None:
+    """Render private guild recruitment list and detail URLs consistently."""
+    query = plugin_module.parse_risingstones_guild_query("星海 50")
+    assert query.mode == "list"
+    assert query.value == "星海"
+    assert query.limit == 20
+    detail = plugin_module.parse_risingstones_guild_query("详情 12345")
+    assert detail.mode == "detail"
+    assert detail.value == "12345"
+
+    text = plugin_module.format_risingstones_guilds(
+        query,
+        [
+            {
+                "id": 12345,
+                "guild_name": "星海旅团",
+                "character_name": "塔塔露",
+                "area_name": "陆行鸟",
+                "group_name": "红玉海",
+                "target_area_name": "陆行鸟",
+                "target_group_name": "红玉海",
+                "labelInfo": [{"name": "休闲"}],
+                "active_member_num": "6-20",
+                "weekday_time": "20:00-23:00",
+                "detail_mask": "欢迎加入",
+            }
+        ],
+    )
+    assert "【石之家部队招待】数量：1" in text
+    assert "标签：休闲" in text
+    assert "#/recruit/guild/detail/12345" in text
