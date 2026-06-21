@@ -172,7 +172,7 @@ def configure_network_settings(config: dict | None) -> None:
         try:
             ipaddress.IPv6Address(proxy_host)
         except ValueError:
-            if re.search(r":\d+$", proxy_host):
+            if ":" in proxy_host:
                 error = "代理地址仅填写 IP 或主机名，端口请填写在单独的端口字段中"
     if not error and not 1 <= port <= 65535:
         error = "代理端口必须在 1 到 65535 之间"

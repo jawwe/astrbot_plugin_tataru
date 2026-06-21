@@ -90,6 +90,16 @@ def test_proxy_host_rejects_embedded_port(plugin_module) -> None:
     plugin_module.configure_network_settings(
         {
             "proxy_enabled": True,
+            "proxy_host": "127.0.0.1:abc",
+            "proxy_port": 7890,
+        }
+    )
+    with pytest.raises(plugin_module.ProxyConfigurationError):
+        plugin_module.proxy_request_options()
+
+    plugin_module.configure_network_settings(
+        {
+            "proxy_enabled": True,
             "proxy_host": "::1",
             "proxy_port": 7890,
         }
