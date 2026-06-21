@@ -133,3 +133,33 @@ def test_risingstones_posts_query_and_formatting(plugin_module) -> None:
     assert "【石之家攻略】 关键词：零式 数量：1" in text
     assert "浏览：120 | 评论：4 | 点赞：9" in text
     assert "#/strat/detail/123" in text
+
+
+def test_risingstones_recruit_query_and_formatting(plugin_module) -> None:
+    """Preserve public recruitment type selection and bounded output."""
+    query = plugin_module.parse_risingstones_recruit_query("副本 妖星乱舞 30")
+    assert query.kind == "party"
+    assert query.keyword == "妖星乱舞"
+    assert query.limit == 20
+
+    text = plugin_module.format_risingstones_recruits(
+        query,
+        [
+            {
+                "id": 53483,
+                "fb_name": "妖星乱舞绝境战",
+                "fb_type": "绝境战",
+                "character_name": "尹辞",
+                "area_name": "莫古力",
+                "group_name": "拂晓之间",
+                "fb_time": "晚8-12 2h",
+                "progress": "P3",
+                "strategy": "寿司优化",
+                "jobInfo": [{"value": "防护职业"}],
+                "updated_at": "2026-06-22 02:20:01",
+            }
+        ],
+    )
+    assert "【石之家招募】类型：副本 关键词：妖星乱舞 数量：1" in text
+    assert "需求：防护职业" in text
+    assert "#/recruit/party?id=53483" in text

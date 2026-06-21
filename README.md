@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.12-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.13-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -84,9 +84,15 @@ https://github.com/jawwe/astrbot_plugin_tataru
 石之家
 石之家 帖子 幻化 5
 石之家 攻略 零式 10
+石之家 招募 副本 妖星乱舞 5
+石之家 招募 萌新 5
+石之家 招募 其他 5
+石之家 招募 RP 5
 ```
 
 默认查询最新帖子。可指定 `帖子` 或 `攻略`，再附加关键词和数量；默认 `10` 条，最多 `20` 条。
+
+在 `石之家 招募` 下，可查询公开的 `副本`、`萌新`、`其他` 和 `RP` 招募；部队招待需要登录态，会在石之家账号绑定功能中提供。
 
 ### 招募
 

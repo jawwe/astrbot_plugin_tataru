@@ -643,6 +643,14 @@ class RisingstonesPostsQuery:
 
 
 @dataclass
+class RisingstonesRecruitQuery:
+    kind: str
+    keyword: str | None
+    page: int
+    limit: int
+
+
+@dataclass
 class LogsQuery:
     boss_name: str | None
     job_name: str | None
@@ -1503,7 +1511,7 @@ def create_help_text() -> str:
 [仙人彩] 帮你选每周仙人仙彩数字
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
-[石之家 (帖子/攻略) (关键词) (数量)] 查石之家公开内容
+[石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -1698,6 +1706,185 @@ def format_risingstones_posts(query: RisingstonesPostsQuery, rows: list[dict]) -
                 f"[{category}] {author} @ {server}",
                 " | ".join([*metrics, created_at]),
                 risingstones_content_url(query.kind, post_id),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def parse_risingstones_recruit_query(value: str) -> RisingstonesRecruitQuery:
+    """Parse public Rising Stones recruitment lookup syntax."""
+    parts = value.split()
+    kind = "party"
+    if parts:
+        kind_aliases = {
+            "副本": "party",
+            "队伍": "party",
+            "party": "party",
+            "萌新": "beginner",
+            "新手": "beginner",
+            "beginner": "beginner",
+            "其他": "other",
+            "other": "other",
+            "rp": "rp",
+            "角色扮演": "rp",
+        }
+        resolved_kind = kind_aliases.get(parts[0].lower())
+        if resolved_kind:
+            kind = resolved_kind
+            parts = parts[1:]
+
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    keyword = " ".join(parts).strip() or None
+    return RisingstonesRecruitQuery(kind=kind, keyword=keyword, page=1, limit=limit)
+
+
+def risingstones_recruit_list_spec(kind: str) -> tuple[str, str | None]:
+    specs = {
+        "party": ("/home/recruit/recruitFbList", "fb_name"),
+        "beginner": ("/home/recruit/recruitNeList", None),
+        "other": ("/home/recruit/recruitOtherList", None),
+        "rp": ("/home/recruit/recruitRpList", "rp_name"),
+    }
+    return specs[kind]
+
+
+async def fetch_risingstones_recruits(query: RisingstonesRecruitQuery) -> list[dict]:
+    """Fetch one public Rising Stones recruitment list with browser headers."""
+    endpoint, keyword_field = risingstones_recruit_list_spec(query.kind)
+    params: dict[str, str | int] = {"page": query.page, "limit": query.limit}
+    if keyword_field and query.keyword:
+        params[keyword_field] = query.keyword
+    response = await aiohttp_request(
+        "GET",
+        f"{RISINGSTONES_API_BASE}{endpoint}?{urlencode(params)}",
+        timeout_seconds=20,
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Referer": RISINGSTONES_WEB_BASE,
+        },
+    )
+    if response.status != 200 or not isinstance(response.payload, dict):
+        raise RuntimeError(f"石之家招募请求失败: HTTP {response.status}")
+    payload = response.payload
+    if payload.get("code") not in {0, 10000}:
+        raise RuntimeError(
+            f"石之家招募接口返回异常: {payload.get('msg') or '未知错误'}"
+        )
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    result = (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+    if query.keyword and not keyword_field:
+        keyword = query.keyword.lower()
+        result = [
+            row
+            for row in result
+            if keyword
+            in " ".join(
+                str(row.get(field) or "")
+                for field in ("title", "detail_mask", "profile", "category_name")
+            ).lower()
+        ]
+    return result
+
+
+def risingstones_recruit_url(kind: str, recruit_id: object) -> str:
+    route = {
+        "party": "party",
+        "beginner": "beginner",
+        "other": "others",
+        "rp": "roleplay",
+    }[kind]
+    return f"{RISINGSTONES_WEB_BASE}#/recruit/{route}?id={quote(str(recruit_id or ''))}"
+
+
+def risingstones_recruit_text(kind: str, row: dict) -> tuple[str, str, str]:
+    if kind == "party":
+        title = str(row.get("fb_name") or "未命名副本招募").strip()
+        category = str(row.get("fb_type") or "副本招募").strip()
+        job_values = [
+            str(item.get("value")).strip()
+            for item in row.get("jobInfo", [])
+            if isinstance(item, dict) and item.get("value")
+        ]
+        detail = " | ".join(
+            text
+            for text in (
+                str(row.get("fb_time") or "").strip(),
+                str(row.get("progress") or "").strip(),
+                str(row.get("strategy") or "").strip(),
+                f"需求：{'、'.join(job_values)}" if job_values else "",
+            )
+            if text
+        )
+    elif kind == "beginner":
+        title = str(row.get("title") or "未命名萌新招待").strip()
+        styles = [
+            str(item.get("name")).strip()
+            for item in row.get("styleInfo", [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+        category = " / ".join(styles) or str(row.get("identity") or "萌新招待")
+        detail = " | ".join(
+            text
+            for text in (
+                str(row.get("weekday_time") or "").strip(),
+                str(row.get("weekend_time") or "").strip(),
+                strip_html(str(row.get("detail_mask") or "")),
+            )
+            if text
+        )
+    elif kind == "other":
+        title = str(row.get("title") or "未命名其他招募").strip()
+        category = str(row.get("category_name") or "其他招募").strip()
+        detail = strip_html(str(row.get("detail_mask") or ""))
+    else:
+        title = str(row.get("rp_name") or "未命名 RP 招募").strip()
+        category = str(row.get("rp_type") or "RP 招募").strip()
+        detail = " | ".join(
+            text
+            for text in (
+                str(row.get("open_time") or "").strip(),
+                strip_html(str(row.get("profile") or "")),
+            )
+            if text
+        )
+    return title, category, detail
+
+
+def format_risingstones_recruits(
+    query: RisingstonesRecruitQuery, rows: list[dict]
+) -> str:
+    """Format public Rising Stones recruitment results for a chat response."""
+    kind_labels = {"party": "副本", "beginner": "萌新", "other": "其他", "rp": "RP"}
+    keyword_label = f" 关键词：{query.keyword}" if query.keyword else ""
+    lines = [
+        f"【石之家招募】类型：{kind_labels[query.kind]}{keyword_label} 数量：{len(rows)}"
+    ]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        title, category, detail = risingstones_recruit_text(query.kind, row)
+        author = str(row.get("character_name") or "未知发布者").strip()
+        server = "@".join(
+            part
+            for part in (
+                str(row.get("area_name") or "").strip(),
+                str(row.get("group_name") or "").strip(),
+            )
+            if part
+        )
+        updated_at = str(
+            row.get("updated_at") or row.get("sort_updated_time") or ""
+        ).strip()
+        lines.extend(
+            [
+                f"\n{index:02d}. [{category}] {title}",
+                f"{author}{f' @ {server}' if server else ''}",
+                detail[:500] if detail else "暂无说明",
+                updated_at,
+                risingstones_recruit_url(query.kind, row.get("id")),
             ]
         )
     return "\n".join(lines)
@@ -4944,10 +5131,34 @@ class TataruPlugin(Star):
     @filter.command("石之家")
     @debug_command("石之家")
     async def risingstones_posts(self, event: AstrMessageEvent):
-        """查询石之家公开帖子与攻略。"""
-        query = parse_risingstones_posts_query(
-            command_args(event.message_str, "石之家")
-        )
+        """查询石之家公开内容和招募。"""
+        raw_query = command_args(event.message_str, "石之家")
+        if raw_query.split(maxsplit=1)[:1] == ["招募"]:
+            query = parse_risingstones_recruit_query(
+                raw_query.removeprefix("招募").strip()
+            )
+            try:
+                rows = await fetch_risingstones_recruits(query)
+            except Exception as exc:
+                logger.warning(f"石之家招募查询失败: {exc}")
+                yield event.plain_result("石之家招募查询失败，请稍后再试")
+                return
+            if not rows:
+                kind_labels = {
+                    "party": "副本",
+                    "beginner": "萌新",
+                    "other": "其他",
+                    "rp": "RP",
+                }
+                keyword_label = f"「{query.keyword}」" if query.keyword else "当前条件"
+                yield event.plain_result(
+                    f"石之家{kind_labels[query.kind]}招募中没有找到{keyword_label}的内容"
+                )
+                return
+            yield event.plain_result(format_risingstones_recruits(query, rows))
+            return
+
+        query = parse_risingstones_posts_query(raw_query)
         try:
             rows = await fetch_risingstones_posts(query)
         except Exception as exc:
