@@ -2,6 +2,10 @@ name: AstrBot Compatibility
 
 on:
   workflow_dispatch:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev, main]
   schedule:
     - cron: "37 4 * * 0"
 
