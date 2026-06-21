@@ -42,9 +42,7 @@ PLUGIN_USER_AGENT = (
 )
 BROWSER_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Edge/125.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
 ]
 
 
@@ -1708,9 +1706,9 @@ def weibo_cookie_value(cookie: str | None, name: str) -> str:
 def get_weibo_headers(cookie: str | None = None, uid: str = WEIBO_UID) -> dict:
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
-            "Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 26_5_1 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "CriOS/150.0.7871.34 Mobile/15E148 Safari/604.1"
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
@@ -1730,7 +1728,7 @@ def get_weibo_web_headers(cookie: str | None = None, uid: str = WEIBO_UID) -> di
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
