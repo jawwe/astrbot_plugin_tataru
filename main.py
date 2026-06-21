@@ -655,6 +655,13 @@ class RisingstonesRecruitQuery:
     limit: int
 
 
+@dataclass
+class RisingstonesGlamourQuery:
+    mode: str
+    value: str | None
+    limit: int
+
+
 class RisingstonesAccountStore:
     """Small per-user SQLite store for private Rising Stones credentials."""
 
@@ -1606,7 +1613,7 @@ def create_help_text() -> str:
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
 [石之家 绑定 Cookie请求头或BearerToken] 私聊绑定石之家账号
-[石之家 我的/通知/统计/签到/自动签到 开启/关闭/解绑] 私聊账号管理
+[石之家 我的/通知/统计/幻化/签到/自动签到 开启/关闭/解绑] 私聊账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -2270,6 +2277,153 @@ def format_risingstones_statistics(statistics: dict[str, list[str]]) -> str:
         lines.append(f"\n[{RISINGSTONES_STAT_LABELS[kind]}]")
         lines.extend(values)
     return "\n".join(lines)
+
+
+def parse_risingstones_glamour_query(value: str) -> RisingstonesGlamourQuery:
+    parts = value.split()
+    mode = "list"
+    if parts and parts[0] in {"详情", "detail"}:
+        mode = "detail"
+        parts = parts[1:]
+    elif parts and parts[0] in {"装备", "equipment"}:
+        mode = "equipment"
+        parts = parts[1:]
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if mode != "detail" and parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    return RisingstonesGlamourQuery(
+        mode=mode, value=" ".join(parts).strip() or None, limit=limit
+    )
+
+
+def risingstones_glamour_url(glamour_id: object) -> str:
+    return f"{RISINGSTONES_WEB_BASE}#/glamour/detail/{quote(str(glamour_id or ''))}"
+
+
+async def risingstones_glamour_rows(
+    credential: str, query: RisingstonesGlamourQuery
+) -> list[dict]:
+    if query.mode == "detail":
+        if not query.value or not query.value.isdigit():
+            raise ValueError("幻化详情需要数字 ID")
+        payload = await risingstones_account_request(
+            credential,
+            "GET",
+            "/home/glamour/glamourDetail",
+            params={"id": query.value},
+        )
+        data = payload.get("data")
+        return [data] if isinstance(data, dict) else []
+
+    if query.mode == "equipment":
+        if not query.value:
+            raise ValueError("装备检索需要装备名称")
+        equipment_payload = await risingstones_account_request(
+            credential,
+            "GET",
+            "/home/gameData/searchEquip",
+            params={"page": "1", "limit": "10", "name": query.value},
+        )
+        equipment_data = equipment_payload.get("data")
+        equipment_rows = (
+            equipment_data.get("rows")
+            if isinstance(equipment_data, dict)
+            else equipment_data
+        )
+        equipment_id = next(
+            (
+                str(item.get("id") or item.get("equipment_id"))
+                for item in equipment_rows or []
+                if isinstance(item, dict)
+                and (item.get("id") or item.get("equipment_id"))
+            ),
+            None,
+        )
+        if not equipment_id:
+            return []
+        payload = await risingstones_account_request(
+            credential,
+            "GET",
+            "/common/search",
+            params={
+                "type": "7",
+                "keywords": equipment_id,
+                "searchByEquipment": "1",
+                "page": "1",
+                "limit": str(query.limit),
+            },
+        )
+    elif query.value:
+        payload = await risingstones_account_request(
+            credential,
+            "GET",
+            "/common/search",
+            params={
+                "type": "7",
+                "keywords": query.value,
+                "page": "1",
+                "limit": str(query.limit),
+            },
+        )
+    else:
+        payload = await risingstones_account_request(
+            credential,
+            "GET",
+            "/home/glamour/glamoursList",
+            params={"page": "1", "limit": str(query.limit)},
+        )
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    return (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+
+
+def format_risingstones_glamour(
+    query: RisingstonesGlamourQuery, rows: list[dict]
+) -> str:
+    labels = {"list": "投稿", "equipment": "装备检索", "detail": "投稿详情"}
+    lines = [f"【石之家幻化】{labels[query.mode]} 数量：{len(rows)}"]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        title = str(row.get("title") or "未命名幻化").strip()
+        author = str(
+            row.get("character_name")
+            or (row.get("userInfo") or {}).get("character_name")
+            or row.get("nickname")
+            or "未知投稿者"
+        ).strip()
+        server = "@".join(
+            part
+            for part in (
+                str(
+                    row.get("area_name")
+                    or (row.get("userInfo") or {}).get("area_name")
+                    or ""
+                ).strip(),
+                str(
+                    row.get("group_name")
+                    or (row.get("userInfo") or {}).get("group_name")
+                    or ""
+                ).strip(),
+            )
+            if part
+        )
+        description = strip_html(str(row.get("desc") or row.get("description") or ""))
+        metrics = []
+        for label, field in (("点赞", "likes"), ("收藏", "favorites")):
+            number = risingstones_number(row.get(field))
+            if number is not None:
+                metrics.append(f"{label}：{number}")
+        lines.extend(
+            [
+                f"\n{index:02d}. {title}",
+                f"{author}{f' @ {server}' if server else ''}",
+                description[:500] if description else "暂无说明",
+                " | ".join(metrics) if metrics else "",
+                risingstones_glamour_url(row.get("id")),
+            ]
+        )
+    return "\n".join(line for line in lines if line != "")
 
 
 def format_risingstones_notifications(data: dict) -> str:
@@ -5597,6 +5751,7 @@ class TataruPlugin(Star):
             "我的",
             "通知",
             "统计",
+            "幻化",
         }:
             return None
         if not is_risingstones_private_event(event):
@@ -5676,6 +5831,19 @@ class TataruPlugin(Star):
             if not statistics:
                 return "当前绑定角色没有可用的石之家统计记录。"
             return format_risingstones_statistics(statistics)
+
+        if action == "幻化":
+            query = parse_risingstones_glamour_query(argument)
+            try:
+                rows = await risingstones_glamour_rows(credential, query)
+            except ValueError as exc:
+                return str(exc)
+            except Exception as exc:
+                logger.warning(f"石之家幻化查询失败: {exc}")
+                return "石之家幻化查询失败，请检查凭据是否过期后重新绑定。"
+            if not rows:
+                return "没有找到符合条件的石之家幻化投稿。"
+            return format_risingstones_glamour(query, rows)
 
         if action == "自动签到":
             enabled = argument in {"开启", "开", "on", "ON"}

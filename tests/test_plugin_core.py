@@ -224,3 +224,34 @@ def test_risingstones_statistics_formatting(plugin_module) -> None:
         {"savage": ["已记录副本数：4个"]}
     )
     assert "[零式数据]" in text
+
+
+def test_risingstones_glamour_query_and_formatting(plugin_module) -> None:
+    """Support list, equipment and detail lookup forms without leaking payloads."""
+    query = plugin_module.parse_risingstones_glamour_query("装备 纯白长袍 30")
+    assert query.mode == "equipment"
+    assert query.value == "纯白长袍"
+    assert query.limit == 20
+
+    detail = plugin_module.parse_risingstones_glamour_query("详情 265250")
+    assert detail.mode == "detail"
+    assert detail.value == "265250"
+
+    text = plugin_module.format_risingstones_glamour(
+        query,
+        [
+            {
+                "id": 265250,
+                "title": "夏日白衣",
+                "character_name": "塔塔露",
+                "area_name": "陆行鸟",
+                "group_name": "红玉海",
+                "desc": "清爽搭配",
+                "likes": 12,
+                "favorites": 3,
+            }
+        ],
+    )
+    assert "【石之家幻化】装备检索 数量：1" in text
+    assert "点赞：12 | 收藏：3" in text
+    assert "#/glamour/detail/265250" in text
