@@ -17,7 +17,6 @@ from astrbot.api.star import Context, Star, register
 from icalendar import Calendar
 from PIL import Image, ImageDraw, ImageFont
 
-
 PLUGIN_DIR = Path(__file__).resolve().parent
 PLUGIN_NAME = "astrbot_plugin_tataru"
 PLUGIN_AUTHOR = "jawwe"
@@ -2190,9 +2189,11 @@ async def create_market_text(query: MarketQuery) -> str:
 
     listings.sort(
         key=lambda item: (
-            item.get("pricePerUnit")
-            if item.get("pricePerUnit") is not None
-            else 10**18,
+            (
+                item.get("pricePerUnit")
+                if item.get("pricePerUnit") is not None
+                else 10**18
+            ),
             item.get("total") if item.get("total") is not None else 10**18,
         )
     )
@@ -2489,18 +2490,22 @@ def build_fflogs_metadata_boss(
         "pk": encounter_id,
         "quest": int(en_zone["id"]),
         "zone_name": en_zone.get("name") or "",
-        "cn_zone_name": cn_zone.get("name")
-        if isinstance(cn_zone, dict)
-        else en_zone.get("name") or "",
+        "cn_zone_name": (
+            cn_zone.get("name")
+            if isinstance(cn_zone, dict)
+            else en_zone.get("name") or ""
+        ),
         "name": en_name,
         "cn_name": cn_name or en_name,
         "nickname": [],
         "patch": 0,
         "savage": fflogs_metadata_difficulty(en_zone),
         "region": fflogs_metadata_regions(en_zone),
-        "cn_region": fflogs_metadata_regions(cn_zone)
-        if cn_zone
-        else fflogs_metadata_regions(en_zone),
+        "cn_region": (
+            fflogs_metadata_regions(cn_zone)
+            if cn_zone
+            else fflogs_metadata_regions(en_zone)
+        ),
     }
 
 
@@ -4709,10 +4714,18 @@ class TataruPlugin(Star):
 
     async def download_calendar_once(self, server: str) -> bool:
         sources = CALENDAR_SOURCES[server]
-        result = await aiohttp_get(sources["primary"], res_type="bytes")
+        try:
+            result = await aiohttp_get(sources["primary"], res_type="bytes")
+        except Exception as exc:
+            logger.warning(f"{server}日历主链接更新异常: {exc}")
+            result = None
         if result is None:
             logger.info(f"{server}日历主链接更新失败，尝试备用链接")
-            result = await aiohttp_get(sources["fallback"], res_type="bytes")
+            try:
+                result = await aiohttp_get(sources["fallback"], res_type="bytes")
+            except Exception as exc:
+                logger.warning(f"{server}日历备用链接更新异常: {exc}")
+                result = None
 
         if result is None:
             logger.warning(f"{server}日历更新失败，将使用本地缓存")
