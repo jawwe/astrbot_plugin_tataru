@@ -707,6 +707,14 @@ async def aiohttp_get(
                 return None
 
 
+async def safe_aiohttp_get(url: str, context: str, **kwargs):
+    try:
+        return await aiohttp_get(url, **kwargs)
+    except Exception as exc:
+        logger.warning(f"{context}请求失败: {exc}")
+        return None
+
+
 def random_left_right() -> str:
     result = []
     for _ in range(5):
@@ -1668,21 +1676,25 @@ async def get_bili_url() -> str:
         "https://docs.qq.com/dop-api/opendoc?"
         f"tab={sheet_id}&id={table_id}&outformat=1&normal=1"
     )
-    docs_json = await aiohttp_get(docs_url, headers=headers)
+    docs_json = await safe_aiohttp_get(docs_url, "腾讯文档接口", headers=headers)
     if docs_json:
         result = find_bili_url_in_obj(docs_json)
         if result:
             logger.info(f"从腾讯文档接口获取暖暖视频链接: {result}")
             return result
 
-    docs_text = await aiohttp_get(docs_url, res_type="text", headers=headers)
+    docs_text = await safe_aiohttp_get(
+        docs_url, "腾讯文档文本", res_type="text", headers=headers
+    )
     if docs_text:
         result = find_bili_url_in_text(docs_text)
         if result:
             logger.info(f"从腾讯文档文本获取暖暖视频链接: {result}")
             return result
 
-    docs_page = await aiohttp_get(QQ_DOC_URL, res_type="text", headers=headers)
+    docs_page = await safe_aiohttp_get(
+        QQ_DOC_URL, "腾讯文档页面", res_type="text", headers=headers
+    )
     if docs_page:
         result = find_bili_url_in_text(docs_page)
         if result:
@@ -1696,8 +1708,10 @@ async def get_bili_url() -> str:
         "https://api.bilibili.com/x/web-interface/search/type?"
         f"search_type=video&keyword={quote(prefix)}&page=1"
     )
-    search_data = await aiohttp_get(
-        search_url, headers={"referer": "https://search.bilibili.com/"}
+    search_data = await safe_aiohttp_get(
+        search_url,
+        "bilibili搜索接口",
+        headers={"referer": "https://search.bilibili.com/"},
     )
     if search_data and search_data.get("code") == 0:
         videos = search_data.get("data", {}).get("result", [])
@@ -1721,8 +1735,10 @@ async def get_bili_url() -> str:
     api_url = (
         f"https://api.bilibili.com/x/space/arc/search?mid={BILI_USER_ID}&ps=10&pn=1"
     )
-    data = await aiohttp_get(
-        api_url, headers={"referer": f"https://space.bilibili.com/{BILI_USER_ID}"}
+    data = await safe_aiohttp_get(
+        api_url,
+        "bilibili空间接口",
+        headers={"referer": f"https://space.bilibili.com/{BILI_USER_ID}"},
     )
     if data and data.get("code") == 0:
         videos = data.get("data", {}).get("list", {}).get("vlist", [])
@@ -2957,7 +2973,12 @@ async def fetch_logs_statistics_summary(
             params["dpstype"] = query.dps_type
         url = f"{host}/zone/statistics/{boss['quest']}?{urlencode(params)}"
         logger.info(f"FFLogs statistics page URL: {url}")
-        page = await aiohttp_get(url, res_type="text", headers={"Referer": host})
+        page = await safe_aiohttp_get(
+            url,
+            "FFLogs statistics page",
+            res_type="text",
+            headers={"Referer": host},
+        )
         if not isinstance(page, str):
             return None
         if index == 0:
@@ -3015,7 +3036,12 @@ async def fetch_logs_statistics_browser_table(
             f"{urlencode(params)}"
         )
         logger.info(f"FFLogs statistics browser table URL: {url}")
-        page = await aiohttp_get(url, res_type="text", headers={"Referer": host})
+        page = await safe_aiohttp_get(
+            url,
+            "FFLogs statistics browser table",
+            res_type="text",
+            headers={"Referer": host},
+        )
         if not isinstance(page, str) or "data.push" not in page:
             continue
         rows = parse_logs_statistics_page(page)
@@ -3054,7 +3080,12 @@ async def fetch_logs_statistics_page(
                 f"{query_string}"
             )
             logger.info(f"FFLogs statistics table URL: {url}")
-            page = await aiohttp_get(url, res_type="text", headers={"Referer": host})
+            page = await safe_aiohttp_get(
+                url,
+                "FFLogs statistics table",
+                res_type="text",
+                headers={"Referer": host},
+            )
             if isinstance(page, str) and "data.push" in page:
                 logger.info(f"FFLogs statistics aggregate matched: {aggregate}")
                 return page, f"{region_info} / {aggregate}"
@@ -3975,6 +4006,20 @@ def format_house_time(timestamp_value) -> str:
         return "未知"
 
 
+def house_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def house_index_label(labels: list[str], value, fallback: str) -> str:
+    index = house_int(value, -1)
+    if 0 <= index < len(labels):
+        return labels[index]
+    return f"{fallback}({value})" if value is not None else fallback
+
+
 async def fetch_house_sales(server_id: int) -> list[dict] | None:
     query = urlencode({"server": server_id, "ts": int(datetime.now().timestamp())})
     payload = await aiohttp_get(f"{HOUSE_API_URL}?{query}", use_api_user_agent=True)
@@ -4012,24 +4057,28 @@ async def create_house_text(query: HouseQuery) -> str:
     filters = []
     if query.area_name:
         area_index = HOUSE_AREA_NAMES.index(query.area_name)
-        matched = [item for item in matched if item.get("Area") == area_index]
+        matched = [
+            item for item in matched if house_int(item.get("Area"), -1) == area_index
+        ]
         filters.append(query.area_name)
     if query.ward is not None:
         matched = [
-            item for item in matched if int(item.get("Slot") or 0) + 1 == query.ward
+            item for item in matched if house_int(item.get("Slot"), 0) + 1 == query.ward
         ]
         filters.append(f"{query.ward}区")
     if query.plot_id is not None:
         matched = [
-            item for item in matched if int(item.get("ID") or 0) == query.plot_id
+            item for item in matched if house_int(item.get("ID"), 0) == query.plot_id
         ]
         filters.append(f"{query.plot_id}号")
     if query.size_name:
         size_index = HOUSE_SIZE_NAMES.index(query.size_name)
-        matched = [item for item in matched if item.get("Size") == size_index]
+        matched = [
+            item for item in matched if house_int(item.get("Size"), -1) == size_index
+        ]
         filters.append(query.size_name)
     matched.sort(
-        key=lambda item: (int(item.get("Slot") or 0), int(item.get("ID") or 0))
+        key=lambda item: (house_int(item.get("Slot")), house_int(item.get("ID")))
     )
 
     filter_text = " ".join(filters) if filters else "全部"
@@ -4045,15 +4094,17 @@ async def create_house_text(query: HouseQuery) -> str:
             f"仅显示前 {len(shown)} 条，可在命令末尾添加数量，最多 {HOUSE_MAX_LISTINGS} 条。"
         )
     for index, item in enumerate(shown, start=1):
-        area_name = HOUSE_AREA_NAMES[int(item.get("Area") or 0)]
-        size_name = HOUSE_SIZE_NAMES[int(item.get("Size") or 0)]
-        slot = int(item.get("Slot") or 0) + 1
-        plot_id = int(item.get("ID") or 0)
-        price = int(item.get("Price") or 0)
+        area_name = house_index_label(HOUSE_AREA_NAMES, item.get("Area"), "未知区域")
+        size_name = house_index_label(HOUSE_SIZE_NAMES, item.get("Size"), "未知大小")
+        slot = house_int(item.get("Slot")) + 1
+        plot_id = house_int(item.get("ID"))
+        price = house_int(item.get("Price"))
         purchase_type = HOUSE_PURCHASE_TYPES.get(
-            int(item.get("PurchaseType") or 0), "未知"
+            house_int(item.get("PurchaseType"), -1), "未知"
         )
-        region_type = HOUSE_REGION_TYPES.get(int(item.get("RegionType") or 0), "未知")
+        region_type = HOUSE_REGION_TYPES.get(
+            house_int(item.get("RegionType"), -1), "未知"
+        )
         last_seen = format_house_time(item.get("LastSeen"))
         lines.append(
             f"{index:02d}. {area_name}{slot}区 {plot_id}号 {size_name} "
@@ -4235,7 +4286,7 @@ async def get_party_finder_entries_api_v2(
             listings.append(listing)
 
     if not listings:
-        return None
+        return []
 
     valid_listings = [
         listing for listing in listings[:fetch_limit] if isinstance(listing, dict)
@@ -4356,9 +4407,6 @@ async def get_party_finder_entries(
             return v2_entries
     except Exception as exc:
         logger.warning(f"招募板 API v2 获取失败，尝试 API v1: {exc}")
-    if duty_ids:
-        return []
-
     try:
         api_entries = await get_party_finder_entries_api_v1(
             data_centre,
@@ -4508,7 +4556,6 @@ class TataruPlugin(Star):
             data_centre = data_centre or world["data_centre"]
         scope_label = world["name"] if world else (data_centre or "全服")
         duty_ids = await resolve_party_duty_ids(search_text)
-        api_search_text = None if duty_ids else search_text
         if duty_ids:
             logger.info(f"招募副本名解析为 duty_id: {search_text} -> {duty_ids}")
 
@@ -4518,7 +4565,7 @@ class TataruPlugin(Star):
                 world_name=world["name"] if world else None,
                 world_id=world["id"] if world else None,
                 category=query.category,
-                search_text=api_search_text,
+                search_text=search_text,
                 job_ids=query.job_ids,
                 duty_ids=duty_ids,
                 limit=query.limit,
@@ -4714,18 +4761,26 @@ class TataruPlugin(Star):
 
     async def download_calendar_once(self, server: str) -> bool:
         sources = CALENDAR_SOURCES[server]
-        try:
-            result = await aiohttp_get(sources["primary"], res_type="bytes")
-        except Exception as exc:
-            logger.warning(f"{server}日历主链接更新异常: {exc}")
-            result = None
+
+        async def fetch_calendar_source(source_name: str, url: str) -> bytes | None:
+            try:
+                result = await aiohttp_get(url, res_type="bytes")
+            except Exception as exc:
+                logger.warning(f"{server}日历{source_name}更新异常: {exc}")
+                return None
+            if result is None:
+                return None
+            try:
+                Calendar.from_ical(result)
+            except Exception as exc:
+                logger.warning(f"{server}日历{source_name}内容解析失败: {exc}")
+                return None
+            return result
+
+        result = await fetch_calendar_source("主链接", sources["primary"])
         if result is None:
             logger.info(f"{server}日历主链接更新失败，尝试备用链接")
-            try:
-                result = await aiohttp_get(sources["fallback"], res_type="bytes")
-            except Exception as exc:
-                logger.warning(f"{server}日历备用链接更新异常: {exc}")
-                result = None
+            result = await fetch_calendar_source("备用链接", sources["fallback"])
 
         if result is None:
             logger.warning(f"{server}日历更新失败，将使用本地缓存")
@@ -4742,13 +4797,24 @@ class TataruPlugin(Star):
             await self.download_calendar_once(server)
 
     def calendar_read_path(self, server: str) -> Path | None:
+        for calendar_path in self.calendar_read_paths(server):
+            try:
+                Calendar.from_ical(calendar_path.read_bytes())
+            except Exception as exc:
+                logger.warning(f"{server}日历文件解析失败: {calendar_path}, {exc}")
+                continue
+            return calendar_path
+        return None
+
+    def calendar_read_paths(self, server: str) -> list[Path]:
+        paths = []
         cache_path = self.calendar_cache_path(server)
         if cache_path.exists():
-            return cache_path
+            paths.append(cache_path)
         bundled_path = CALENDAR_SOURCES[server]["bundled"]
         if bundled_path and bundled_path.exists():
-            return bundled_path
-        return None
+            paths.append(bundled_path)
+        return paths
 
     def create_calendar_text(self, server: str) -> str:
         calendar_path = self.calendar_read_path(server)
@@ -4765,8 +4831,14 @@ class TataruPlugin(Star):
             if component.name != "VEVENT":
                 continue
 
-            start_raw = component.get("dtstart").dt
-            end_raw = component.get("dtend").dt
+            start_component = component.get("dtstart")
+            end_component = component.get("dtend")
+            if start_component is None or end_component is None:
+                logger.warning(f"{server}日历事件缺少开始或结束时间，已跳过")
+                continue
+
+            start_raw = start_component.dt
+            end_raw = end_component.dt
             start_date, start_info = normalize_calendar_date(start_raw)
             end_date, end_info = normalize_calendar_date(end_raw)
 
