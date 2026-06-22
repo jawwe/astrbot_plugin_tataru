@@ -223,7 +223,7 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
     assert plugin_module.configured_risingstones_credentials(None) is None
     guide = plugin_module.risingstones_binding_guide()
     assert "getUserInfo" in guide
-    assert "Copy as cURL" in guide
+    assert "Copy as cURL (bash)" in guide
 
 
 def test_risingstones_personal_actions_never_use_owner_cookie(

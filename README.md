@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.22-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.23-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -118,7 +118,7 @@ https://github.com/jawwe/astrbot_plugin_tataru
 石之家 解绑
 ```
 
-在私聊发送 `石之家 绑定` 后，机器人会返回 Chrome Console 脚本。石之家会话 Cookie 不允许网页脚本直接读取，因此脚本仅触发一条已登录的资料请求。随后在 Chrome 开发者工具 Network 中筛选 `getUserInfo`，右键该请求并选择 `Copy > Copy as cURL`，将完整 cURL 原样私聊发送给机器人即可完成绑定；插件会自动提取 Cookie 和登录 User-Agent。若 Chrome 首次阻止粘贴，请先在 Console 输入 `allow pasting`。
+在私聊发送 `石之家 绑定` 后，机器人会返回 Chrome Console 脚本。石之家会话 Cookie 不允许网页脚本直接读取，因此脚本仅触发一条已登录的资料请求。随后在 Chrome 开发者工具 Network 中筛选 `getUserInfo`，右键该请求并明确选择 `Copy > Copy as cURL (bash)`（中文界面为“以 cURL (bash) 格式复制”），将完整 cURL 原样私聊发送给机器人即可完成绑定；插件会自动提取 Cookie 和登录 User-Agent。不要选择 cmd、PowerShell、fetch 或 Node.js 格式。若 Chrome 首次阻止粘贴，请先在 Console 输入 `allow pasting`。
 
 绑定会先验证账号是否已绑定角色。旧版只保存 Cookie 的绑定无法继续使用，需要按上面的流程重新绑定。自动签到默认关闭；开启后，插件会在 `Asia/Shanghai` 时区的配置时点执行，每个账号每天最多尝试一次。
 

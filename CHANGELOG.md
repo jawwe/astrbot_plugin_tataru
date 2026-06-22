@@ -1,5 +1,11 @@
 # 更新日志
 
+## v1.0.23
+
+### 调整
+
+- 石之家绑定引导明确要求使用 Chrome DevTools 的“以 cURL (bash) 格式复制”，并提示不要使用 cmd、PowerShell、fetch 或 Node.js 格式。
+
 ## v1.0.22
 
 ### 修复

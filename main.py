@@ -342,7 +342,7 @@ RISINGSTONES_CONSOLE_SCRIPT = """fetch(
   { credentials: 'include' },
 )
   .then((response) => response.text())
-  .then(() => console.log('请求已发出：请在 Network 中筛选 getUserInfo，右键该请求并选择 Copy > Copy as cURL。'))
+  .then(() => console.log('请求已发出：请在 Network 中筛选 getUserInfo，右键该请求并选择 Copy > Copy as cURL (bash)。'))
   .catch((error) => console.error('请求触发失败：', error));"""
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
@@ -2107,7 +2107,7 @@ def risingstones_binding_guide() -> str:
         "石之家 Cookie 不允许网页脚本直接读取，因此请按以下步骤获取登录信息：\n"
         "1. 保持石之家网页登录，按 F12 打开开发者工具并切到 Console。\n"
         "2. 粘贴并运行下方脚本，再切到 Network。\n"
-        "3. 筛选 `getUserInfo`，右键该请求，选择 Copy > Copy as cURL。\n"
+        "3. 筛选 `getUserInfo`，右键该请求，选择 Copy > Copy as cURL (bash)。\n"
         "4. 将完整 cURL 内容私聊发送：石之家 绑定 <完整 cURL>\n\n"
         "```javascript\n"
         f"{RISINGSTONES_CONSOLE_SCRIPT}\n"
@@ -6052,7 +6052,7 @@ class TataruPlugin(Star):
                 if not credentials:
                     return (
                         "绑定信息格式不正确。请发送 `石之家 绑定` 获取 Chrome 控制台脚本，"
-                        "再将复制结果在私聊中发送给机器人。"
+                        "并在 Network 中选择“以 cURL (bash) 格式复制”后，将完整内容私聊发送给机器人。"
                     )
                 try:
                     profile = await risingstones_verify_credential(credentials)
