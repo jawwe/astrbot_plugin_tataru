@@ -22,9 +22,7 @@ function setView(view) {
   for (const section of document.querySelectorAll(".view")) { const active = section.id === view; section.hidden = !active; section.classList.toggle("active", active); }
   for (const item of document.querySelectorAll(".nav-item")) item.classList.toggle("active", item.dataset.view === view);
   $("#page-title").textContent = titles[view];
-  if (view === "risingstones") loadRisingstones();
-  if (view === "database") loadDatabase();
-  if (view === "activity") loadActivity();
+  void loadViewData(view);
 }
 
 function renderOverview(data) {
@@ -58,6 +56,12 @@ async function loadRisingstones() {
 }
 async function loadDatabase() { const data = await bridge.apiGet("admin/database/summary"); $("#admin-db-size").textContent = bytes(data.admin.size); $("#admin-db-tables").textContent = `${data.admin.tables.length} 张表`; $("#risingstones-db-size").textContent = bytes(data.risingstones.size); $("#risingstones-db-summary").textContent = `${data.risingstones.accounts} 个账号`; $("#fflogs-tracking-count").textContent = data.fflogs_tracking.count; }
 async function loadActivity() { const data = await bridge.apiGet("admin/activity"); $("#activity-list").innerHTML = activityRows(data.activity); }
+async function loadViewData(view) {
+  const loaders = { risingstones: loadRisingstones, database: loadDatabase, activity: loadActivity };
+  const loader = loaders[view];
+  if (!loader) return;
+  try { await loader(); } catch (error) { setStatus(`${titles[view]}加载失败：${error.message}`, true); }
+}
 
 async function runTest(target, button) {
   const output = document.querySelector(`[data-result="${target}"]`); button.disabled = true; output.textContent = "测试中..."; output.classList.remove("error");
@@ -70,7 +74,7 @@ $("#refresh").addEventListener("click", async () => { setStatus("正在刷新...
 $("#save-features").addEventListener("click", async () => { const features = {}; for (const input of document.querySelectorAll("[data-feature]")) features[input.dataset.feature] = input.checked; try { const result = await bridge.apiPost("admin/features", { features }); renderFeatures(result.features); setStatus("功能开关已保存。"); await loadOverview(); } catch (error) { setStatus(`保存失败：${error.message}`, true); } });
 for (const button of document.querySelectorAll("[data-test]")) button.addEventListener("click", () => runTest(button.dataset.test, button));
 $("#save-owner-curl").addEventListener("click", async () => { const curl = $("#owner-curl").value.trim(); if (!curl) { setStatus("请输入完整 getUserInfo cURL（bash）。", true); return; } try { await bridge.apiPost("admin/risingstones/owner-curl", { curl }); setStatus("主人石之家凭据已保存。", false); await loadRisingstones(); await loadOverview(); } catch (error) { setStatus(`保存失败：${error.message}`, true); } });
-$("#backup-db").addEventListener("click", async () => { try { const result = await bridge.apiPost("admin/database/backup", {}); $("#database-result").textContent = `已创建备份：${result.created}`; await loadActivity(); } catch (error) { $("#database-result").textContent = `备份失败：${error.message}`; $("#database-result").classList.add("error"); } });
+$("#backup-db").addEventListener("click", async () => { try { const result = await bridge.apiPost("admin/database/backup", {}); $("#database-result").textContent = `已创建备份：${result.created}`; $("#database-result").classList.remove("error"); await loadActivity(); } catch (error) { $("#database-result").textContent = `备份失败：${error.message}`; $("#database-result").classList.add("error"); } });
 $("#clear-cache").addEventListener("click", async () => { if (!window.confirm("确认清理插件图片与响应缓存？此操作不会删除数据库。")) return; try { const result = await bridge.apiPost("admin/database/clear-cache", { confirmed: true }); $("#database-result").textContent = `已清理 ${result.removed} 个缓存文件。`; $("#database-result").classList.remove("error"); await loadOverview(); } catch (error) { $("#database-result").textContent = `清理失败：${error.message}`; $("#database-result").classList.add("error"); } });
 
 await bridge.ready();

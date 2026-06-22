@@ -518,11 +518,27 @@ def test_admin_page_registers_authenticated_operations_routes(plugin_module) -> 
 
     plugin_module.TataruPlugin(Context(), {})
 
-    registered = {route for route, *_ in routes}
-    assert f"/{plugin_module.PLUGIN_NAME}/admin/overview" in registered
-    assert f"/{plugin_module.PLUGIN_NAME}/admin/features" in registered
-    assert f"/{plugin_module.PLUGIN_NAME}/admin/tests/risingstones" in registered
-    assert f"/{plugin_module.PLUGIN_NAME}/admin/database/summary" in registered
+    registered = {
+        (route, tuple(methods)) for route, _handler, methods, _description in routes
+    }
+    base = f"/{plugin_module.PLUGIN_NAME}/admin"
+    expected = {
+        (f"{base}/overview", ("GET",)),
+        (f"{base}/features", ("GET",)),
+        (f"{base}/features", ("POST",)),
+        (f"{base}/tests/proxy", ("POST",)),
+        (f"{base}/tests/fflogs", ("POST",)),
+        (f"{base}/tests/risingstones", ("POST",)),
+        (f"{base}/tests/sources", ("POST",)),
+        (f"{base}/risingstones/owner-curl", ("GET",)),
+        (f"{base}/risingstones/owner-curl", ("POST",)),
+        (f"{base}/risingstones/accounts", ("GET",)),
+        (f"{base}/database/summary", ("GET",)),
+        (f"{base}/database/backup", ("POST",)),
+        (f"{base}/database/clear-cache", ("POST",)),
+        (f"{base}/activity", ("GET",)),
+    }
+    assert expected.issubset(registered)
 
 
 def test_admin_overview_reports_sanitized_runtime_state(
