@@ -2385,7 +2385,9 @@ def risingstones_stat_lines(kind: str, data: object) -> list[str]:
             clear_times = item.get("clear_times")
             dead_times = item.get("dead_times")
             job_name = item.get("job_name")
-            parts = [f"通关：{clear_times}" if clear_times not in {None, ""} else ""]
+            parts = []
+            if clear_times not in {None, ""}:
+                parts.append(f"通关：{clear_times}")
             if dead_times not in {None, ""}:
                 parts.append(f"倒地：{dead_times}")
             if job_name:
@@ -6337,7 +6339,7 @@ class TataruPlugin(Star):
                 return str(exc)
             except Exception as exc:
                 logger.warning(f"石之家部队招待查询失败: {exc}")
-                return "石之家部队招待查询失败，请检查私聊绑定信息或插件设置页的石之家 Cookie 和登录 User-Agent。"
+                return "石之家部队招待查询失败，请检查私聊绑定信息或插件设置页的石之家 cURL (bash) 配置。"
             if not rows:
                 return "没有找到符合条件的石之家部队招待。"
             return format_risingstones_guilds(query, rows)
@@ -6801,5 +6803,7 @@ class TataruPlugin(Star):
     async def terminate(self):
         if self.calendar_task:
             self.calendar_task.cancel()
+        if self.risingstones_checkin_task:
+            self.risingstones_checkin_task.cancel()
         debug_log("plugin.terminate")
         logger.info("Tataru AstrBot plugin terminated.")
