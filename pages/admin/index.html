@@ -9,9 +9,10 @@
   <body>
     <main class="app-shell">
       <aside class="sidebar" aria-label="塔塔露管理导航">
-        <div class="brand"><img src="../../logo.png" alt="塔塔露" /><span>塔塔露</span></div>
+        <div class="brand"><img src="./logo.png" alt="塔塔露" /><span>塔塔露</span></div>
         <nav class="nav-list">
           <button class="nav-item active" data-view="overview" type="button">首页</button>
+          <button class="nav-item" data-view="settings" type="button">插件设置</button>
           <button class="nav-item" data-view="features" type="button">功能开关</button>
           <button class="nav-item" data-view="tests" type="button">功能测试</button>
           <button class="nav-item" data-view="risingstones" type="button">石之家</button>
@@ -58,8 +59,19 @@
           </section>
         </section>
 
+        <section id="settings" class="view" hidden>
+          <div class="view-heading"><div><h2>插件设置</h2><p>此处与 AstrBot 插件设置共用同一份配置。敏感字段只显示是否已设置，留空不会覆盖已保存的值。</p></div></div>
+          <form id="settings-form" class="settings-grid">
+            <section class="panel"><div class="panel-heading"><h3>运行与默认行为</h3></div><label class="checkbox-row"><input id="config-debug-mode" type="checkbox" />启用调试模式</label><label class="checkbox-row"><input id="config-global-calendar" type="checkbox" />默认使用国际服日历</label><label class="checkbox-row"><input id="config-global-fflogs" type="checkbox" />默认使用国际服 FFLogs</label></section>
+            <section class="panel"><div class="panel-heading"><h3>网络代理</h3></div><label class="checkbox-row"><input id="config-proxy-enabled" type="checkbox" />启用网络代理</label><div class="field-grid"><label>代理地址<input id="config-proxy-host" type="text" placeholder="127.0.0.1" /></label><label>代理端口<input id="config-proxy-port" type="number" min="0" max="65535" /></label><label>代理用户名<input id="config-proxy-username" type="text" autocomplete="off" /></label><label>代理密码<input id="config-proxy-password" type="password" autocomplete="new-password" /><small id="config-proxy-password-status"></small><button class="text-button clear-secret" data-secret="proxy_password" type="button">清除已保存密码</button></label></div></section>
+            <section class="panel"><div class="panel-heading"><h3>数据源凭据</h3></div><div class="field-grid"><label>微博 Cookie<input id="config-weibo-cookie" type="password" autocomplete="new-password" /><small id="config-weibo-cookie-status"></small><button class="text-button clear-secret" data-secret="weibo_cookie" type="button">清除已保存 Cookie</button></label><label>FFLogs Client ID<input id="config-fflogs-client-id" type="password" autocomplete="new-password" /><small id="config-fflogs-client-id-status"></small><button class="text-button clear-secret" data-secret="fflogs_client_id" type="button">清除已保存 Client ID</button></label><label>FFLogs Client Secret<input id="config-fflogs-client-secret" type="password" autocomplete="new-password" /><small id="config-fflogs-client-secret-status"></small><button class="text-button clear-secret" data-secret="fflogs_client_secret" type="button">清除已保存 Client Secret</button></label></div></section>
+            <section class="panel"><div class="panel-heading"><h3>图片字体</h3></div><div class="field-grid"><label>文本字体路径<input id="config-font-path" type="text" placeholder="/path/to/SimHei.ttf" /></label><label>FFXIV 图标字体路径<input id="config-ffxiv-icon-font-path" type="text" placeholder="/path/to/FFXIV_Lodestone_SSF.ttf" /></label></div></section>
+            <div class="form-actions"><button class="button" type="submit">保存插件设置</button><output id="settings-result" class="test-result"></output></div>
+          </form>
+        </section>
+
         <section id="features" class="view" hidden>
-          <div class="view-heading"><div><h2>功能开关</h2><p>停用后对应命令会立即返回管理台停用提示，不再访问外部数据源。</p></div><button id="save-features" class="button" type="button">保存开关</button></div>
+          <div class="view-heading"><div><h2>功能开关</h2><p>每条命令独立控制。停用后对应命令会立即返回管理台停用提示，不再访问外部数据源。</p></div><button id="save-features" class="button" type="button">保存开关</button></div>
           <div id="feature-list" class="feature-grid"></div>
         </section>
 
@@ -75,8 +87,10 @@
 
         <section id="risingstones" class="view" hidden>
           <div class="view-heading"><div><h2>石之家</h2><p>主人凭据仅用于公开查询兜底；个人信息、签到及自动签到仍必须由用户私聊绑定。</p></div></div>
+          <section class="panel"><div class="panel-heading"><h3>功能开关</h3><button id="save-risingstones-features" class="button" type="button">保存石之家开关</button></div><div id="risingstones-feature-list" class="feature-grid"></div></section>
+          <section class="panel"><div class="panel-heading"><h3>自动签到时点</h3><span class="subtle">Asia/Shanghai</span></div><div class="inline-field"><label>每日执行小时<input id="config-risingstones-checkin-hour" type="number" min="0" max="23" /></label><button id="save-risingstones-hour" class="button secondary" type="button">保存时点</button></div></section>
           <section class="panel form-panel">
-            <div class="panel-heading"><h3>主人 getUserInfo cURL（bash）</h3><span id="owner-curl-status" class="subtle">未加载</span></div>
+            <div class="panel-heading"><h3>主人 getUserInfo cURL（bash）</h3><span id="owner-curl-status" class="subtle secret-summary">未加载</span></div>
             <textarea id="owner-curl" rows="7" spellcheck="false" placeholder="从 Chrome DevTools 的 getUserInfo 请求选择“以 cURL (bash) 格式复制”后粘贴到此处。"></textarea>
             <div class="form-actions"><button id="save-owner-curl" class="button" type="button">保存凭据</button><button class="button secondary" data-test="risingstones" type="button">验证登录态</button></div>
           </section>

@@ -131,6 +131,14 @@ def mask_debug_secret(value: object) -> str:
     return text[:2] + "*" * (len(text) - 4) + text[-2:]
 
 
+def mask_admin_display_secret(value: object) -> str:
+    """Keep Page summaries readable without exposing full sensitive values."""
+    text = str(value or "")
+    if len(text) <= 6:
+        return "*" * max(3, len(text))
+    return text[:3] + "*" * min(10, max(3, len(text) - 6)) + text[-3:]
+
+
 def sanitize_debug_url(url: str) -> str:
     try:
         parsed = urlsplit(url)
@@ -888,7 +896,7 @@ class RisingstonesAccountStore:
             ).fetchall()
         return [
             {
-                "account": mask_debug_secret(account_key),
+                "account": mask_admin_display_secret(account_key),
                 "auto_checkin": bool(auto_checkin),
                 "last_checkin_date": last_checkin_date or "",
                 "last_attempt_date": last_attempt_date or "",
@@ -899,32 +907,94 @@ class RisingstonesAccountStore:
 
 
 ADMIN_FEATURE_DEFAULTS = {
-    "core": True,
+    "help": True,
+    "precious": True,
+    "lottery": True,
+    "calendar": True,
+    "nuannuan": True,
+    "dungeon_note": True,
     "party_finder": True,
-    "market": True,
-    "fflogs": True,
-    "risingstones": True,
     "weibo": True,
+    "item": True,
+    "market": True,
+    "house": True,
+    "logs_dps": True,
+    "character_logs": True,
+    "tarot": True,
+    "risingstones_content": True,
+    "risingstones_recruit": True,
+    "risingstones_binding": True,
+    "risingstones_profile": True,
+    "risingstones_checkin": True,
+    "risingstones_glamour": True,
+    "risingstones_guild": True,
+}
+
+LEGACY_ADMIN_FEATURE_MEMBERS = {
+    "core": (
+        "help",
+        "precious",
+        "lottery",
+        "calendar",
+        "nuannuan",
+        "dungeon_note",
+        "tarot",
+    ),
+    "party_finder": ("party_finder",),
+    "market": ("item", "market", "house"),
+    "fflogs": ("logs_dps", "character_logs"),
+    "weibo": ("weibo",),
+    "risingstones": (
+        "risingstones_content",
+        "risingstones_recruit",
+        "risingstones_binding",
+        "risingstones_profile",
+        "risingstones_checkin",
+        "risingstones_glamour",
+        "risingstones_guild",
+    ),
 }
 
 ADMIN_COMMAND_FEATURES = {
-    "帮帮忙": "core",
-    "选门": "core",
-    "仙人彩": "core",
-    "日历": "core",
-    "暖暖": "core",
-    "攻略": "core",
-    "抽卡": "core",
-    "石之家": "risingstones",
+    "帮帮忙": "help",
+    "选门": "precious",
+    "仙人彩": "lottery",
+    "日历": "calendar",
+    "暖暖": "nuannuan",
+    "攻略": "dungeon_note",
     "招募": "party_finder",
     "看看微博": "weibo",
-    "物品": "market",
+    "物品": "item",
     "价格": "market",
-    "房子": "market",
-    "房屋": "market",
-    "输出": "fflogs",
-    "logs": "fflogs",
+    "房子": "house",
+    "房屋": "house",
+    "输出": "logs_dps",
+    "logs": "character_logs",
+    "抽卡": "tarot",
 }
+
+ADMIN_CONFIG_BOOLEAN_FIELDS = (
+    "debug_mode",
+    "proxy_enabled",
+    "use_global_calendar",
+    "use_global_fflogs",
+)
+ADMIN_CONFIG_INTEGER_LIMITS = {
+    "proxy_port": (0, 65535),
+    "risingstones_checkin_hour": (0, 23),
+}
+ADMIN_CONFIG_TEXT_FIELDS = (
+    "proxy_host",
+    "proxy_username",
+    "font_path",
+    "ffxiv_icon_font_path",
+)
+ADMIN_CONFIG_SECRET_FIELDS = (
+    "proxy_password",
+    "weibo_cookie",
+    "fflogs_client_id",
+    "fflogs_client_secret",
+)
 
 
 def admin_feature_for_command(command_name: str) -> str | None:
@@ -1007,16 +1077,21 @@ class PluginAdminStore:
             saved = json.loads(str(row[0]))
         except (TypeError, ValueError, json.JSONDecodeError):
             saved = {}
-        return {
-            key: bool(saved.get(key, default))
-            for key, default in ADMIN_FEATURE_DEFAULTS.items()
-        }
+        flags = dict(ADMIN_FEATURE_DEFAULTS)
+        for legacy_key, members in LEGACY_ADMIN_FEATURE_MEMBERS.items():
+            if legacy_key in saved:
+                for member in members:
+                    flags[member] = bool(saved[legacy_key])
+        for key in ADMIN_FEATURE_DEFAULTS:
+            if key in saved:
+                flags[key] = bool(saved[key])
+        return flags
 
     def set_feature_flags(self, flags: dict[str, bool]) -> dict[str, bool]:
-        resolved = {
-            key: bool(flags.get(key, default))
-            for key, default in ADMIN_FEATURE_DEFAULTS.items()
-        }
+        resolved = self.get_feature_flags()
+        for key, value in flags.items():
+            if key in ADMIN_FEATURE_DEFAULTS:
+                resolved[key] = bool(value)
         now = datetime.now(RISINGSTONES_TIMEZONE).isoformat(timespec="seconds")
         with sqlite3.connect(self.path) as connection:
             connection.execute(
@@ -1112,6 +1187,93 @@ class PluginAdminStore:
 def feature_enabled(store: PluginAdminStore, feature: str) -> bool:
     """Resolve one page-managed feature flag with a safe enabled default."""
     return store.get_feature_flags().get(feature, True)
+
+
+def risingstones_feature_for_query(raw_query: str) -> str:
+    """Resolve the detailed Rising Stones switch for one command invocation."""
+    action = raw_query.strip().split(maxsplit=1)[0] if raw_query.strip() else ""
+    if action == "招募":
+        return "risingstones_recruit"
+    if action in {"绑定", "解绑"}:
+        return "risingstones_binding"
+    if action in {"我的", "通知", "统计"}:
+        return "risingstones_profile"
+    if action in {"签到", "自动签到"}:
+        return "risingstones_checkin"
+    if action == "幻化":
+        return "risingstones_glamour"
+    if action == "部队":
+        return "risingstones_guild"
+    return "risingstones_content"
+
+
+def admin_settings_public_view(config: dict | None) -> dict[str, object]:
+    """Expose editable configuration while returning only secret presence flags."""
+    config = config or {}
+    settings: dict[str, object] = {
+        key: bool(config.get(key, False)) for key in ADMIN_CONFIG_BOOLEAN_FIELDS
+    }
+    settings.update(
+        {key: int(config.get(key, 0) or 0) for key in ADMIN_CONFIG_INTEGER_LIMITS}
+    )
+    settings.update(
+        {
+            key: str(config.get(key, "") or "").strip()
+            for key in ADMIN_CONFIG_TEXT_FIELDS
+        }
+    )
+    settings.update(
+        {
+            f"{key}_set": bool(str(config.get(key, "") or "").strip())
+            for key in ADMIN_CONFIG_SECRET_FIELDS
+        }
+    )
+    return settings
+
+
+def validate_admin_settings_update(payload: object) -> dict[str, object]:
+    """Validate one Page settings update and return the changed config values."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("settings"), dict):
+        raise ValueError("插件设置必须是 JSON 对象。")
+    settings = payload["settings"]
+    updates: dict[str, object] = {}
+    for key in ADMIN_CONFIG_BOOLEAN_FIELDS:
+        if key in settings:
+            if not isinstance(settings[key], bool):
+                raise ValueError(f"{key} 必须是布尔值。")
+            updates[key] = settings[key]
+    for key, (minimum, maximum) in ADMIN_CONFIG_INTEGER_LIMITS.items():
+        if key in settings:
+            value = settings[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} 必须是整数。")
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{key} 必须在 {minimum} 到 {maximum} 之间。")
+            updates[key] = value
+    for key in ADMIN_CONFIG_TEXT_FIELDS:
+        if key in settings:
+            value = settings[key]
+            if not isinstance(value, str):
+                raise ValueError(f"{key} 必须是字符串。")
+            updates[key] = value.strip()
+
+    clear_secrets = payload.get("clear_secrets", [])
+    if not isinstance(clear_secrets, list) or any(
+        key not in ADMIN_CONFIG_SECRET_FIELDS for key in clear_secrets
+    ):
+        raise ValueError("清除字段包含不支持的敏感配置。")
+    for key in ADMIN_CONFIG_SECRET_FIELDS:
+        if key in clear_secrets:
+            updates[key] = ""
+            continue
+        if key not in settings:
+            continue
+        value = settings[key]
+        if not isinstance(value, str):
+            raise ValueError(f"{key} 必须是字符串。")
+        if value.strip():
+            updates[key] = value.strip()
+    return updates
 
 
 def build_admin_overview(
@@ -6426,6 +6588,8 @@ class TataruPlugin(Star):
         """Register the authenticated endpoints used by the admin Page."""
         endpoints = [
             ("overview", self.admin_overview, ["GET"], "Get Tataru admin overview"),
+            ("settings", self.admin_settings_get, ["GET"], "Get Tataru settings"),
+            ("settings", self.admin_settings_save, ["POST"], "Save Tataru settings"),
             ("features", self.admin_features_get, ["GET"], "Get Tataru feature flags"),
             (
                 "features",
@@ -6493,6 +6657,12 @@ class TataruPlugin(Star):
     def _admin_risingstones_summary(self) -> dict[str, int]:
         return self.risingstones_accounts.summary()
 
+    def _persist_plugin_config(self) -> None:
+        """Persist Page-managed settings when AstrBot passes an AstrBotConfig."""
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            save_config()
+
     async def admin_overview(self):
         """Return live plugin state without exposing configuration secrets."""
         summary = self._admin_risingstones_summary()
@@ -6534,6 +6704,22 @@ class TataruPlugin(Star):
 
     async def admin_features_get(self):
         return page_json_response({"features": self.admin_store.get_feature_flags()})
+
+    async def admin_settings_get(self):
+        return page_json_response({"settings": admin_settings_public_view(self.config)})
+
+    async def admin_settings_save(self):
+        payload = await get_page_request_json()
+        try:
+            updates = validate_admin_settings_update(payload)
+        except ValueError as exc:
+            return page_error_response(str(exc))
+        for key, value in updates.items():
+            self.config[key] = value
+        configure_network_settings(self.config)
+        self._persist_plugin_config()
+        self.admin_store.record_activity("settings", "success", sorted(updates))
+        return await self.admin_settings_get()
 
     async def admin_features_save(self):
         payload = await get_page_request_json()
@@ -6644,7 +6830,7 @@ class TataruPlugin(Star):
         return page_json_response(
             {
                 "configured": bool(curl_value),
-                "summary": mask_debug_secret(curl_value) if curl_value else "",
+                "summary": mask_admin_display_secret(curl_value) if curl_value else "",
             }
         )
 
@@ -6660,6 +6846,7 @@ class TataruPlugin(Star):
         curl_value = curl_value.strip()
         self.admin_store.set_setting("risingstones_owner_curl", curl_value)
         self.config["risingstones_owner_curl"] = curl_value
+        self._persist_plugin_config()
         self.admin_store.record_activity(
             "risingstones.owner_curl", "success", "updated"
         )
@@ -6795,6 +6982,10 @@ class TataruPlugin(Star):
     async def risingstones_posts(self, event: AstrMessageEvent):
         """查询石之家公开内容和招募。"""
         raw_query = command_args(event.message_str, "石之家")
+        feature = risingstones_feature_for_query(raw_query)
+        if not feature_enabled(self.admin_store, feature):
+            yield event.plain_result("该石之家功能已在塔塔露管理台中停用。")
+            return
         private_result = await self.risingstones_private_action(event, raw_query)
         if isinstance(private_result, RisingstonesGlamourResponse):
             for message in private_result.messages:
@@ -7246,7 +7437,10 @@ class TataruPlugin(Star):
         while True:
             try:
                 now = datetime.now(RISINGSTONES_TIMEZONE)
-                if now.hour == self.risingstones_checkin_hour():
+                if (
+                    feature_enabled(self.admin_store, "risingstones_checkin")
+                    and now.hour == self.risingstones_checkin_hour()
+                ):
                     day = now.date().isoformat()
                     accounts = self.risingstones_accounts.due_auto_checkins(day)
                     for account_key, credentials in accounts:
