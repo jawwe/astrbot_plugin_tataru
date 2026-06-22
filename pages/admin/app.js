@@ -189,15 +189,24 @@ function collectFeatureFlags(container) {
   return Object.fromEntries(Array.from($(container).querySelectorAll("[data-feature]")).map((input) => [input.dataset.feature, input.checked]));
 }
 
+async function refreshAfterWrite(refresh, successMessage, reportError = (message) => setStatus(message, true)) {
+  try {
+    await refresh();
+  } catch (error) {
+    reportError(`${successMessage} 页面刷新失败：${error.message}`);
+  }
+}
+
 async function saveFeatureFlags(container, successMessage) {
   try {
     const result = await bridge.apiPost("admin/features", { features: collectFeatureFlags(container) });
     renderFeatures(result.features);
     setStatus(successMessage);
-    await loadOverview();
   } catch (error) {
     setStatus(`保存失败：${error.message}`, true);
+    return;
   }
+  await refreshAfterWrite(loadOverview, successMessage);
 }
 
 function collectPluginSettings() {
@@ -227,7 +236,7 @@ async function savePluginSettings(settings, successMessage) {
   state.clearSecrets.clear();
   renderSettings(result.settings);
   setStatus(successMessage);
-  await loadOverview();
+  await refreshAfterWrite(loadOverview, successMessage);
 }
 
 async function runTest(target, button) {
@@ -239,7 +248,7 @@ async function runTest(target, button) {
     const result = await bridge.apiPost(`admin/tests/${target}`, {});
     output.textContent = `${result.success ? "成功" : "失败"} | ${result.latency_ms ?? "--"} ms | ${result.message}`;
     output.classList.toggle("error", !result.success);
-    await loadOverview();
+    await refreshAfterWrite(loadOverview, "测试已执行。");
   } catch (error) {
     output.textContent = `测试失败：${error.message}`;
     output.classList.add("error");
@@ -272,14 +281,24 @@ for (const button of document.querySelectorAll("[data-test]")) button.addEventLi
 $("#save-owner-curl").addEventListener("click", async () => {
   const curl = $("#owner-curl").value.trim();
   if (!curl) { setStatus("请输入完整 getUserInfo cURL（bash）。", true); return; }
-  try { await bridge.apiPost("admin/risingstones/owner-curl", { curl }); setStatus("主人石之家凭据已保存。"); await loadRisingstones(); await loadOverview(); } catch (error) { setStatus(`保存失败：${error.message}`, true); }
+  try { await bridge.apiPost("admin/risingstones/owner-curl", { curl }); } catch (error) { setStatus(`保存失败：${error.message}`, true); return; }
+  setStatus("主人石之家凭据已保存。");
+  await refreshAfterWrite(async () => { await loadRisingstones(); await loadOverview(); }, "主人石之家凭据已保存。");
 });
 $("#backup-db").addEventListener("click", async () => {
-  try { const result = await bridge.apiPost("admin/database/backup", {}); $("#database-result").textContent = `已创建备份：${result.created}`; $("#database-result").classList.remove("error"); await loadActivity(); } catch (error) { $("#database-result").textContent = `备份失败：${error.message}`; $("#database-result").classList.add("error"); }
+  let successMessage;
+  try { const result = await bridge.apiPost("admin/database/backup", {}); successMessage = `已创建备份：${result.created}`; } catch (error) { $("#database-result").textContent = `备份失败：${error.message}`; $("#database-result").classList.add("error"); return; }
+  $("#database-result").textContent = successMessage;
+  $("#database-result").classList.remove("error");
+  await refreshAfterWrite(loadActivity, successMessage, (message) => { $("#database-result").textContent = message; $("#database-result").classList.add("error"); });
 });
 $("#clear-cache").addEventListener("click", async () => {
   if (!window.confirm("确认清理插件图片与响应缓存？此操作不会删除数据库。")) return;
-  try { const result = await bridge.apiPost("admin/database/clear-cache", { confirmed: true }); $("#database-result").textContent = `已清理 ${result.removed} 个缓存文件。`; $("#database-result").classList.remove("error"); await loadOverview(); } catch (error) { $("#database-result").textContent = `清理失败：${error.message}`; $("#database-result").classList.add("error"); }
+  let successMessage;
+  try { const result = await bridge.apiPost("admin/database/clear-cache", { confirmed: true }); successMessage = `已清理 ${result.removed} 个缓存文件。`; } catch (error) { $("#database-result").textContent = `清理失败：${error.message}`; $("#database-result").classList.add("error"); return; }
+  $("#database-result").textContent = successMessage;
+  $("#database-result").classList.remove("error");
+  await refreshAfterWrite(loadOverview, successMessage, (message) => { $("#database-result").textContent = message; $("#database-result").classList.add("error"); });
 });
 
 await bridge.ready();

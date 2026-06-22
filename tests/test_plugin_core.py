@@ -641,3 +641,12 @@ def test_admin_display_mask_keeps_short_prefix_suffix(plugin_module) -> None:
     assert masked.startswith("abc")
     assert masked.endswith("rst")
     assert masked.count("*") == 10
+
+
+def test_admin_page_keeps_successful_writes_distinct_from_refresh_failures() -> None:
+    """A failed post-write refresh must not be reported as a failed write."""
+    page_script = (ROOT / "pages" / "admin" / "app.js").read_text(encoding="utf-8")
+
+    assert "async function refreshAfterWrite" in page_script
+    assert "页面刷新失败" in page_script
+    assert "await refreshAfterWrite(loadOverview, successMessage)" in page_script
