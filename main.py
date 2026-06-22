@@ -25,6 +25,39 @@ from astrbot.api.star import Context, Star, register
 from icalendar import Calendar
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from astrbot.api.web import error_response as page_error_response
+    from astrbot.api.web import json_response as page_json_response
+    from astrbot.api.web import request as page_request
+
+    async def get_page_request_json() -> object:
+        return await page_request.json(default={})
+
+except ModuleNotFoundError:
+    try:
+        from quart import jsonify, request as page_request
+
+        def page_json_response(data: object, *, status_code: int = 200):
+            return jsonify(data), status_code
+
+        def page_error_response(message: str, *, status_code: int = 400):
+            return jsonify({"status": "error", "message": message}), status_code
+
+        async def get_page_request_json() -> object:
+            return await page_request.get_json(silent=True) or {}
+
+    except ModuleNotFoundError:
+
+        def page_json_response(data: object, *, status_code: int = 200):
+            return data
+
+        def page_error_response(message: str, *, status_code: int = 400):
+            return {"status": "error", "message": message}
+
+        async def get_page_request_json() -> object:
+            return {}
+
+
 PLUGIN_DIR = Path(__file__).resolve().parent
 PLUGIN_NAME = "astrbot_plugin_tataru"
 PLUGIN_AUTHOR = "jawwe"
@@ -96,6 +129,14 @@ def mask_debug_secret(value: object) -> str:
     if len(text) <= 4:
         return "*" * max(4, len(text))
     return text[:2] + "*" * (len(text) - 4) + text[-2:]
+
+
+def mask_admin_display_secret(value: object) -> str:
+    """Keep Page summaries readable without exposing full sensitive values."""
+    text = str(value or "")
+    if len(text) <= 6:
+        return "*" * max(3, len(text))
+    return text[:3] + "*" * min(10, max(3, len(text) - 6)) + text[-3:]
 
 
 def sanitize_debug_url(url: str) -> str:
@@ -232,6 +273,13 @@ def debug_command(command_name: str):
     def decorator(handler):
         @wraps(handler)
         async def wrapper(self, *args, **kwargs):
+            feature = admin_feature_for_command(command_name)
+            admin_store = getattr(self, "admin_store", None)
+            if feature and admin_store and not feature_enabled(admin_store, feature):
+                event = args[0] if args else kwargs.get("event")
+                if event is not None:
+                    yield event.plain_result("该功能已在塔塔露管理台中停用。")
+                return
             debug_log("command.start", command=command_name)
             try:
                 async for result in handler(self, *args, **kwargs):
@@ -335,6 +383,7 @@ RISINGSTONES_WEB_BASE = "https://ff14risingstones.web.sdo.com/pc/index.html"
 RISINGSTONES_DEFAULT_LIMIT = 10
 RISINGSTONES_MAX_LIMIT = 20
 RISINGSTONES_DB_PATH = DATA_DIR / "risingstones.sqlite3"
+ADMIN_DB_PATH = DATA_DIR / "admin.sqlite3"
 RISINGSTONES_TIMEZONE = ZoneInfo("Asia/Shanghai")
 RISINGSTONES_IMPERSONATE = "chrome124"
 RISINGSTONES_BINDING_SEPARATOR = " | "
@@ -821,6 +870,443 @@ class RisingstonesAccountStore:
                 "UPDATE risingstones_accounts SET last_checkin_date = ? WHERE account_key = ?",
                 (day, account_key),
             )
+
+    def summary(self) -> dict[str, int]:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(auto_checkin), 0)
+                FROM risingstones_accounts
+                """
+            ).fetchone()
+        return {"accounts": int(row[0]), "auto_checkin_accounts": int(row[1])}
+
+    def admin_rows(self, limit: int = 100) -> list[dict[str, object]]:
+        limit = max(1, min(limit, 100))
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT account_key, auto_checkin, last_checkin_date, last_attempt_date,
+                       updated_at
+                FROM risingstones_accounts
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "account": mask_admin_display_secret(account_key),
+                "auto_checkin": bool(auto_checkin),
+                "last_checkin_date": last_checkin_date or "",
+                "last_attempt_date": last_attempt_date or "",
+                "updated_at": updated_at,
+            }
+            for account_key, auto_checkin, last_checkin_date, last_attempt_date, updated_at in rows
+        ]
+
+
+ADMIN_FEATURE_DEFAULTS = {
+    "help": True,
+    "precious": True,
+    "lottery": True,
+    "calendar": True,
+    "nuannuan": True,
+    "dungeon_note": True,
+    "party_finder": True,
+    "weibo": True,
+    "item": True,
+    "market": True,
+    "house": True,
+    "logs_dps": True,
+    "character_logs": True,
+    "tarot": True,
+    "risingstones_content": True,
+    "risingstones_recruit": True,
+    "risingstones_binding": True,
+    "risingstones_profile": True,
+    "risingstones_checkin": True,
+    "risingstones_glamour": True,
+    "risingstones_guild": True,
+}
+
+LEGACY_ADMIN_FEATURE_MEMBERS = {
+    "core": (
+        "help",
+        "precious",
+        "lottery",
+        "calendar",
+        "nuannuan",
+        "dungeon_note",
+        "tarot",
+    ),
+    "party_finder": ("party_finder",),
+    "market": ("item", "market", "house"),
+    "fflogs": ("logs_dps", "character_logs"),
+    "weibo": ("weibo",),
+    "risingstones": (
+        "risingstones_content",
+        "risingstones_recruit",
+        "risingstones_binding",
+        "risingstones_profile",
+        "risingstones_checkin",
+        "risingstones_glamour",
+        "risingstones_guild",
+    ),
+}
+
+ADMIN_COMMAND_FEATURES = {
+    "帮帮忙": "help",
+    "选门": "precious",
+    "仙人彩": "lottery",
+    "日历": "calendar",
+    "暖暖": "nuannuan",
+    "攻略": "dungeon_note",
+    "招募": "party_finder",
+    "看看微博": "weibo",
+    "物品": "item",
+    "价格": "market",
+    "房子": "house",
+    "房屋": "house",
+    "输出": "logs_dps",
+    "logs": "character_logs",
+    "抽卡": "tarot",
+}
+
+ADMIN_CONFIG_BOOLEAN_FIELDS = (
+    "debug_mode",
+    "proxy_enabled",
+    "use_global_calendar",
+    "use_global_fflogs",
+)
+ADMIN_CONFIG_INTEGER_LIMITS = {
+    "proxy_port": (0, 65535),
+    "risingstones_checkin_hour": (0, 23),
+}
+ADMIN_CONFIG_TEXT_FIELDS = (
+    "proxy_host",
+    "proxy_username",
+    "font_path",
+    "ffxiv_icon_font_path",
+)
+ADMIN_CONFIG_SECRET_FIELDS = (
+    "proxy_password",
+    "weibo_cookie",
+    "fflogs_client_id",
+    "fflogs_client_secret",
+)
+
+
+def admin_feature_for_command(command_name: str) -> str | None:
+    """Return the feature switch that controls a public plugin command."""
+    return ADMIN_COMMAND_FEATURES.get(command_name)
+
+
+def plugin_cache_size(cache_dir: Path) -> int:
+    """Sum only files below the plugin cache directory."""
+    if not cache_dir.exists():
+        return 0
+    return sum(path.stat().st_size for path in cache_dir.rglob("*") if path.is_file())
+
+
+def sanitize_admin_activity_detail(value: object) -> str:
+    """Store short operational context without persisting credentials."""
+    text = str(value or "").strip()
+    text = re.sub(
+        r"(?i)\b(cookie|token|authorization|secret|password|curl)\s*[:=]\s*([^\s;]+)",
+        lambda match: f"{match.group(1)}={mask_debug_secret(match.group(2))}",
+        text,
+    )
+    return text[:240]
+
+
+class PluginAdminStore:
+    """Private operational state for the authenticated plugin Page."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admin_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admin_activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    detail TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fflogs_tracking_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform_id TEXT NOT NULL,
+                    sender_key TEXT NOT NULL,
+                    character_name TEXT NOT NULL,
+                    world_name TEXT NOT NULL,
+                    region TEXT NOT NULL DEFAULT 'CN',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_synced_at TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(platform_id, sender_key, character_name, world_name)
+                )
+                """
+            )
+
+    def get_feature_flags(self) -> dict[str, bool]:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT setting_value FROM admin_settings WHERE setting_key = 'feature_flags'"
+            ).fetchone()
+        if not row:
+            return dict(ADMIN_FEATURE_DEFAULTS)
+        try:
+            saved = json.loads(str(row[0]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            saved = {}
+        flags = dict(ADMIN_FEATURE_DEFAULTS)
+        for legacy_key, members in LEGACY_ADMIN_FEATURE_MEMBERS.items():
+            if legacy_key in saved:
+                for member in members:
+                    flags[member] = bool(saved[legacy_key])
+        for key in ADMIN_FEATURE_DEFAULTS:
+            if key in saved:
+                flags[key] = bool(saved[key])
+        return flags
+
+    def set_feature_flags(self, flags: dict[str, bool]) -> dict[str, bool]:
+        resolved = self.get_feature_flags()
+        for key, value in flags.items():
+            if key in ADMIN_FEATURE_DEFAULTS:
+                resolved[key] = bool(value)
+        now = datetime.now(RISINGSTONES_TIMEZONE).isoformat(timespec="seconds")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_settings (setting_key, setting_value, updated_at)
+                VALUES ('feature_flags', ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value,
+                    updated_at = excluded.updated_at
+                """,
+                (json.dumps(resolved, ensure_ascii=False), now),
+            )
+        return resolved
+
+    def get_setting(self, key: str) -> str:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT setting_value FROM admin_settings WHERE setting_key = ?", (key,)
+            ).fetchone()
+        return str(row[0]) if row else ""
+
+    def set_setting(self, key: str, value: str) -> None:
+        now = datetime.now(RISINGSTONES_TIMEZONE).isoformat(timespec="seconds")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_settings (setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, now),
+            )
+
+    def record_activity(self, source: str, status: str, detail: object = "") -> None:
+        now = datetime.now(RISINGSTONES_TIMEZONE).isoformat(timespec="seconds")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_activity (created_at, source, status, detail)
+                VALUES (?, ?, ?, ?)
+                """,
+                (now, source[:64], status[:32], sanitize_admin_activity_detail(detail)),
+            )
+
+    def recent_activity(self, limit: int = 20) -> list[dict[str, str]]:
+        limit = max(1, min(limit, 100))
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT created_at, source, status, detail
+                FROM admin_activity
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "created_at": str(created_at),
+                "source": str(source),
+                "status": str(status),
+                "detail": str(detail),
+            }
+            for created_at, source, status, detail in rows
+        ]
+
+    def database_summary(self) -> dict[str, object]:
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+            table_names = [
+                str(row[0]) for row in rows if not str(row[0]).startswith("sqlite_")
+            ]
+            row_counts = {
+                table_name: int(
+                    connection.execute(
+                        f'SELECT COUNT(*) FROM "{table_name.replace(chr(34), chr(34) * 2)}"'
+                    ).fetchone()[0]
+                )
+                for table_name in table_names
+            }
+        return {
+            "path_name": self.path.name,
+            "size": self.path.stat().st_size if self.path.exists() else 0,
+            "tables": table_names,
+            "row_counts": row_counts,
+        }
+
+
+def feature_enabled(store: PluginAdminStore, feature: str) -> bool:
+    """Resolve one page-managed feature flag with a safe enabled default."""
+    return store.get_feature_flags().get(feature, True)
+
+
+def risingstones_feature_for_query(raw_query: str) -> str:
+    """Resolve the detailed Rising Stones switch for one command invocation."""
+    action = raw_query.strip().split(maxsplit=1)[0] if raw_query.strip() else ""
+    if action == "招募":
+        return "risingstones_recruit"
+    if action in {"绑定", "解绑"}:
+        return "risingstones_binding"
+    if action in {"我的", "通知", "统计"}:
+        return "risingstones_profile"
+    if action in {"签到", "自动签到"}:
+        return "risingstones_checkin"
+    if action == "幻化":
+        return "risingstones_glamour"
+    if action == "部队":
+        return "risingstones_guild"
+    return "risingstones_content"
+
+
+def admin_settings_public_view(config: dict | None) -> dict[str, object]:
+    """Expose editable configuration while returning only secret presence flags."""
+    config = config or {}
+    settings: dict[str, object] = {
+        key: bool(config.get(key, False)) for key in ADMIN_CONFIG_BOOLEAN_FIELDS
+    }
+    settings.update(
+        {key: int(config.get(key, 0) or 0) for key in ADMIN_CONFIG_INTEGER_LIMITS}
+    )
+    settings.update(
+        {
+            key: str(config.get(key, "") or "").strip()
+            for key in ADMIN_CONFIG_TEXT_FIELDS
+        }
+    )
+    settings.update(
+        {
+            f"{key}_set": bool(str(config.get(key, "") or "").strip())
+            for key in ADMIN_CONFIG_SECRET_FIELDS
+        }
+    )
+    return settings
+
+
+def validate_admin_settings_update(payload: object) -> dict[str, object]:
+    """Validate one Page settings update and return the changed config values."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("settings"), dict):
+        raise ValueError("插件设置必须是 JSON 对象。")
+    settings = payload["settings"]
+    updates: dict[str, object] = {}
+    for key in ADMIN_CONFIG_BOOLEAN_FIELDS:
+        if key in settings:
+            if not isinstance(settings[key], bool):
+                raise ValueError(f"{key} 必须是布尔值。")
+            updates[key] = settings[key]
+    for key, (minimum, maximum) in ADMIN_CONFIG_INTEGER_LIMITS.items():
+        if key in settings:
+            value = settings[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} 必须是整数。")
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{key} 必须在 {minimum} 到 {maximum} 之间。")
+            updates[key] = value
+    for key in ADMIN_CONFIG_TEXT_FIELDS:
+        if key in settings:
+            value = settings[key]
+            if not isinstance(value, str):
+                raise ValueError(f"{key} 必须是字符串。")
+            updates[key] = value.strip()
+
+    clear_secrets = payload.get("clear_secrets", [])
+    if not isinstance(clear_secrets, list) or any(
+        key not in ADMIN_CONFIG_SECRET_FIELDS for key in clear_secrets
+    ):
+        raise ValueError("清除字段包含不支持的敏感配置。")
+    for key in ADMIN_CONFIG_SECRET_FIELDS:
+        if key in clear_secrets:
+            updates[key] = ""
+            continue
+        if key not in settings:
+            continue
+        value = settings[key]
+        if not isinstance(value, str):
+            raise ValueError(f"{key} 必须是字符串。")
+        if value.strip():
+            updates[key] = value.strip()
+    return updates
+
+
+def build_admin_overview(
+    store: PluginAdminStore,
+    *,
+    version: str,
+    started_at: datetime,
+    risingstones_accounts: int,
+    auto_checkin_accounts: int,
+) -> dict:
+    now = datetime.now(RISINGSTONES_TIMEZONE)
+    database_size = store.path.stat().st_size if store.path.exists() else 0
+    return {
+        "version": version,
+        "uptime_seconds": max(0, int((now - started_at).total_seconds())),
+        "database_size": database_size,
+        "risingstones_accounts": risingstones_accounts,
+        "auto_checkin_accounts": auto_checkin_accounts,
+        "feature_flags": store.get_feature_flags(),
+        "activity": store.recent_activity(limit=8),
+    }
+
+
+def sanitize_admin_test_result(result: dict[str, object]) -> dict[str, object]:
+    """Remove request secrets before returning a Page test result."""
+    return {
+        key: value for key, value in result.items() if not is_sensitive_debug_key(key)
+    }
+
+
+def validate_owner_curl_for_admin(value: str) -> bool:
+    """Accept only a parseable Chrome cURL (bash) request for getUserInfo."""
+    return "getUserInfo" in value and parse_risingstones_curl_binding(value) is not None
 
 
 @dataclass
@@ -6035,18 +6521,30 @@ class TataruPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         configure_network_settings(self.config)
+        self.started_at = datetime.now(RISINGSTONES_TIMEZONE)
         self.tarot_dict: dict | None = None
         self.cache_dir = PLUGIN_DIR / ".cache"
         self.calendar_task: asyncio.Task | None = None
         self.risingstones_checkin_task: asyncio.Task | None = None
         self.risingstones_accounts = RisingstonesAccountStore(RISINGSTONES_DB_PATH)
+        self.admin_store = PluginAdminStore(ADMIN_DB_PATH)
         self.last_calendar_download_time: dict[str, datetime] = {}
+        self._register_admin_web_apis(context)
 
     async def initialize(self):
         debug_log("plugin.initialize", version=PLUGIN_VERSION)
         self.tarot_dict = load_tarot()
         self.cache_dir.mkdir(exist_ok=True)
         self.risingstones_accounts.initialize()
+        self.admin_store.initialize()
+        saved_owner_curl = self.admin_store.get_setting("risingstones_owner_curl")
+        if saved_owner_curl and not self.config.get("risingstones_owner_curl"):
+            self.config["risingstones_owner_curl"] = saved_owner_curl
+        elif self.config.get("risingstones_owner_curl"):
+            self.admin_store.set_setting(
+                "risingstones_owner_curl",
+                str(self.config["risingstones_owner_curl"]).strip(),
+            )
         self.calendar_task = asyncio.create_task(self.download_calendar_loop())
         self.risingstones_checkin_task = asyncio.create_task(
             self.risingstones_checkin_loop()
@@ -6085,6 +6583,339 @@ class TataruPlugin(Star):
         except (TypeError, ValueError):
             hour = 8
         return hour if 0 <= hour <= 23 else 8
+
+    def _register_admin_web_apis(self, context: Context) -> None:
+        """Register the authenticated endpoints used by the admin Page."""
+        endpoints = [
+            ("overview", self.admin_overview, ["GET"], "Get Tataru admin overview"),
+            ("settings", self.admin_settings_get, ["GET"], "Get Tataru settings"),
+            ("settings", self.admin_settings_save, ["POST"], "Save Tataru settings"),
+            ("features", self.admin_features_get, ["GET"], "Get Tataru feature flags"),
+            (
+                "features",
+                self.admin_features_save,
+                ["POST"],
+                "Save Tataru feature flags",
+            ),
+            ("tests/proxy", self.admin_test_proxy, ["POST"], "Test Tataru proxy"),
+            ("tests/fflogs", self.admin_test_fflogs, ["POST"], "Test FFLogs access"),
+            (
+                "tests/risingstones",
+                self.admin_test_risingstones,
+                ["POST"],
+                "Test Rising Stones access",
+            ),
+            (
+                "tests/sources",
+                self.admin_test_sources,
+                ["POST"],
+                "Test public data sources",
+            ),
+            (
+                "risingstones/owner-curl",
+                self.admin_owner_curl_get,
+                ["GET"],
+                "Get owner Rising Stones cURL status",
+            ),
+            (
+                "risingstones/owner-curl",
+                self.admin_owner_curl_save,
+                ["POST"],
+                "Save owner Rising Stones cURL",
+            ),
+            (
+                "risingstones/accounts",
+                self.admin_risingstones_accounts,
+                ["GET"],
+                "List masked Rising Stones accounts",
+            ),
+            (
+                "database/summary",
+                self.admin_database_summary,
+                ["GET"],
+                "Get Tataru database summary",
+            ),
+            (
+                "database/backup",
+                self.admin_database_backup,
+                ["POST"],
+                "Back up Tataru admin database",
+            ),
+            (
+                "database/clear-cache",
+                self.admin_clear_cache,
+                ["POST"],
+                "Clear Tataru cache files",
+            ),
+            ("activity", self.admin_activity, ["GET"], "Get Tataru admin activity"),
+        ]
+        for suffix, handler, methods, description in endpoints:
+            context.register_web_api(
+                f"/{PLUGIN_NAME}/admin/{suffix}", handler, methods, description
+            )
+
+    def _admin_risingstones_summary(self) -> dict[str, int]:
+        return self.risingstones_accounts.summary()
+
+    def _persist_plugin_config(self) -> None:
+        """Persist Page-managed settings when AstrBot passes an AstrBotConfig."""
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            save_config()
+
+    async def admin_overview(self):
+        """Return live plugin state without exposing configuration secrets."""
+        summary = self._admin_risingstones_summary()
+        overview = build_admin_overview(
+            self.admin_store,
+            version=PLUGIN_VERSION,
+            started_at=self.started_at,
+            risingstones_accounts=summary["accounts"],
+            auto_checkin_accounts=summary["auto_checkin_accounts"],
+        )
+        overview.update(
+            {
+                "cache_size": plugin_cache_size(self.cache_dir),
+                "tasks": {
+                    "calendar": bool(
+                        self.calendar_task and not self.calendar_task.done()
+                    ),
+                    "risingstones_checkin": bool(
+                        self.risingstones_checkin_task
+                        and not self.risingstones_checkin_task.done()
+                    ),
+                },
+                "network": {
+                    "proxy_enabled": NETWORK_SETTINGS.proxy_enabled,
+                    "proxy_error": NETWORK_SETTINGS.proxy_error or "",
+                },
+                "sources": {
+                    "fflogs_configured": bool(
+                        self.fflogs_client_id() and self.fflogs_client_secret()
+                    ),
+                    "risingstones_owner_configured": bool(
+                        self.risingstones_owner_credentials()
+                    ),
+                    "weibo_cookie_configured": bool(self.weibo_cookie()),
+                },
+            }
+        )
+        return page_json_response(overview)
+
+    async def admin_features_get(self):
+        return page_json_response({"features": self.admin_store.get_feature_flags()})
+
+    async def admin_settings_get(self):
+        return page_json_response({"settings": admin_settings_public_view(self.config)})
+
+    async def admin_settings_save(self):
+        payload = await get_page_request_json()
+        try:
+            updates = validate_admin_settings_update(payload)
+        except ValueError as exc:
+            return page_error_response(str(exc))
+        for key, value in updates.items():
+            self.config[key] = value
+        configure_network_settings(self.config)
+        self._persist_plugin_config()
+        self.admin_store.record_activity("settings", "success", sorted(updates))
+        return await self.admin_settings_get()
+
+    async def admin_features_save(self):
+        payload = await get_page_request_json()
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("features"), dict
+        ):
+            return page_error_response("功能开关必须是 JSON 对象。")
+        raw_features = payload["features"]
+        if any(not isinstance(value, bool) for value in raw_features.values()):
+            return page_error_response("功能开关值必须是布尔值。")
+        flags = self.admin_store.set_feature_flags(raw_features)
+        self.admin_store.record_activity("features", "success", "updated feature flags")
+        return page_json_response({"features": flags})
+
+    async def _admin_http_test(
+        self,
+        *,
+        source: str,
+        url: str,
+        use_api_user_agent: bool = False,
+    ):
+        started = time.monotonic()
+        try:
+            response = await aiohttp_request(
+                "GET",
+                url,
+                res_type="text",
+                timeout_seconds=12,
+                use_api_user_agent=use_api_user_agent,
+            )
+            result = {
+                "source": source,
+                "success": response.status == 200,
+                "status": response.status,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+                "message": "请求完成" if response.status == 200 else "服务返回异常状态",
+            }
+        except Exception as exc:
+            result = {
+                "source": source,
+                "success": False,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+                "message": f"请求失败：{type(exc).__name__}",
+            }
+        safe_result = sanitize_admin_test_result(result)
+        self.admin_store.record_activity(
+            f"test.{source}",
+            "success" if safe_result["success"] else "failed",
+            safe_result,
+        )
+        return page_json_response(safe_result)
+
+    async def admin_test_proxy(self):
+        if not NETWORK_SETTINGS.proxy_enabled:
+            return page_error_response("代理未启用，无法执行代理连接测试。")
+        if NETWORK_SETTINGS.proxy_error:
+            return page_error_response(NETWORK_SETTINGS.proxy_error)
+        return await self._admin_http_test(
+            source="proxy", url="https://www.example.com/", use_api_user_agent=False
+        )
+
+    async def admin_test_fflogs(self):
+        return await self._admin_http_test(
+            source="fflogs", url="https://cn.fflogs.com/", use_api_user_agent=False
+        )
+
+    async def admin_test_sources(self):
+        return await self._admin_http_test(
+            source="calendar",
+            url=CALENDAR_SOURCES["国服"]["primary"],
+            use_api_user_agent=False,
+        )
+
+    async def admin_test_risingstones(self):
+        credentials = self.risingstones_owner_credentials()
+        if not credentials:
+            return page_error_response(
+                "请先保存有效的石之家 getUserInfo cURL（bash）。"
+            )
+        started = time.monotonic()
+        try:
+            profile = await risingstones_verify_credential(credentials)
+            result = {
+                "source": "risingstones",
+                "success": True,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+                "message": "主人登录态有效",
+                "character_name": str(profile.get("character_name", "") or ""),
+                "server_name": str(profile.get("server_name", "") or ""),
+            }
+        except Exception as exc:
+            result = {
+                "source": "risingstones",
+                "success": False,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+                "message": f"验证失败：{type(exc).__name__}",
+            }
+        safe_result = sanitize_admin_test_result(result)
+        self.admin_store.record_activity(
+            "test.risingstones",
+            "success" if safe_result["success"] else "failed",
+            safe_result,
+        )
+        return page_json_response(safe_result)
+
+    async def admin_owner_curl_get(self):
+        curl_value = self.admin_store.get_setting("risingstones_owner_curl")
+        return page_json_response(
+            {
+                "configured": bool(curl_value),
+                "summary": mask_admin_display_secret(curl_value) if curl_value else "",
+            }
+        )
+
+    async def admin_owner_curl_save(self):
+        payload = await get_page_request_json()
+        curl_value = payload.get("curl", "") if isinstance(payload, dict) else ""
+        if not isinstance(curl_value, str) or not validate_owner_curl_for_admin(
+            curl_value
+        ):
+            return page_error_response(
+                "仅接受 Chrome DevTools 复制的 getUserInfo cURL（bash）内容。"
+            )
+        curl_value = curl_value.strip()
+        self.admin_store.set_setting("risingstones_owner_curl", curl_value)
+        self.config["risingstones_owner_curl"] = curl_value
+        self._persist_plugin_config()
+        self.admin_store.record_activity(
+            "risingstones.owner_curl", "success", "updated"
+        )
+        return await self.admin_owner_curl_get()
+
+    async def admin_risingstones_accounts(self):
+        return page_json_response(
+            {"accounts": self.risingstones_accounts.admin_rows(limit=100)}
+        )
+
+    async def admin_database_summary(self):
+        risingstones = self._admin_risingstones_summary()
+        admin_database = self.admin_store.database_summary()
+        return page_json_response(
+            {
+                "admin": admin_database,
+                "risingstones": {
+                    **risingstones,
+                    "size": (
+                        RISINGSTONES_DB_PATH.stat().st_size
+                        if RISINGSTONES_DB_PATH.exists()
+                        else 0
+                    ),
+                },
+                "cache_size": plugin_cache_size(self.cache_dir),
+                "fflogs_tracking": {
+                    "reserved": True,
+                    "count": int(
+                        admin_database["row_counts"].get("fflogs_tracking_accounts", 0)
+                    ),
+                    "message": "仅预留存储结构，尚未启用角色跟踪。",
+                },
+            }
+        )
+
+    async def admin_database_backup(self):
+        import shutil
+
+        backup_dir = DATA_DIR / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(RISINGSTONES_TIMEZONE).strftime("%Y%m%d-%H%M%S")
+        backup_path = backup_dir / f"admin-{timestamp}.sqlite3"
+        try:
+            shutil.copy2(self.admin_store.path, backup_path)
+        except OSError as exc:
+            self.admin_store.record_activity(
+                "database.backup", "failed", type(exc).__name__
+            )
+            return page_error_response("数据库备份失败。", status_code=500)
+        self.admin_store.record_activity("database.backup", "success", backup_path.name)
+        return page_json_response({"created": backup_path.name})
+
+    async def admin_clear_cache(self):
+        payload = await get_page_request_json()
+        if not isinstance(payload, dict) or payload.get("confirmed") is not True:
+            return page_error_response("清理缓存需要明确确认。")
+        removed = 0
+        if self.cache_dir.exists():
+            for path in self.cache_dir.rglob("*"):
+                if path.is_file():
+                    path.unlink()
+                    removed += 1
+        self.admin_store.record_activity("cache.clear", "success", f"removed={removed}")
+        return page_json_response({"removed": removed, "cache_size": 0})
+
+    async def admin_activity(self):
+        return page_json_response(
+            {"activity": self.admin_store.recent_activity(limit=100)}
+        )
 
     def render_text_image(
         self, text: str, output_path: Path, width_now: int = 20
@@ -6151,6 +6982,10 @@ class TataruPlugin(Star):
     async def risingstones_posts(self, event: AstrMessageEvent):
         """查询石之家公开内容和招募。"""
         raw_query = command_args(event.message_str, "石之家")
+        feature = risingstones_feature_for_query(raw_query)
+        if not feature_enabled(self.admin_store, feature):
+            yield event.plain_result("该石之家功能已在塔塔露管理台中停用。")
+            return
         private_result = await self.risingstones_private_action(event, raw_query)
         if isinstance(private_result, RisingstonesGlamourResponse):
             for message in private_result.messages:
@@ -6602,7 +7437,10 @@ class TataruPlugin(Star):
         while True:
             try:
                 now = datetime.now(RISINGSTONES_TIMEZONE)
-                if now.hour == self.risingstones_checkin_hour():
+                if (
+                    feature_enabled(self.admin_store, "risingstones_checkin")
+                    and now.hour == self.risingstones_checkin_hour()
+                ):
                     day = now.date().isoformat()
                     accounts = self.risingstones_accounts.due_auto_checkins(day)
                     for account_key, credentials in accounts:
