@@ -1,10 +1,10 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.11-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.24-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
-面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
+面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
 
 ## 功能特性
 
@@ -18,6 +18,7 @@
 | `仙人彩` | 随机给出 3 组仙人彩号码 | 文本 |
 | `日历` | 查询国服 / 国际服活动日历 | 文本 |
 | `攻略` | 查询副本攻略 | 图片 / 文本 |
+| `石之家` | 查询石之家公开帖子和攻略 | 文本 |
 | `招募` | 查询 FF14 国服招募板 | 图片 |
 | `看看微博` | 查询 FF14 官方微博最新消息 | 文本 |
 | `物品` | 查询物品基础信息和获取方式 | 图标 + 图片 |
@@ -76,6 +77,58 @@ https://github.com/jawwe/astrbot_plugin_tataru
 攻略 副本等级 副本名
 攻略 副本名 文本
 ```
+
+### 石之家
+
+```text
+石之家
+石之家 帖子 幻化 5
+石之家 攻略 零式 10
+石之家 招募 副本 妖星乱舞 5
+石之家 招募 萌新 5
+石之家 招募 其他 5
+石之家 招募 RP 5
+```
+
+默认查询最新帖子。可指定 `帖子` 或 `攻略`，再附加关键词和数量；默认 `10` 条，最多 `20` 条。
+
+在 `石之家 招募` 下，可查询公开的 `副本`、`萌新`、`其他` 和 `RP` 招募；部队招待需要登录态，会在石之家账号绑定功能中提供。
+
+### 石之家账号与签到
+
+`我的`、`通知`、`统计`、签到和自动签到仅能在私聊中使用，并且必须由对应用户私聊绑定石之家登录信息。凭据按平台和用户独立保存到插件本地 SQLite 数据库，不会在消息或日志中回显。
+
+```text
+石之家 绑定
+石之家 我的
+石之家 通知
+石之家 统计
+石之家 统计 零式
+石之家 统计 深层
+石之家 幻化
+石之家 幻化 夏日 5
+石之家 幻化 装备 纯白长袍
+石之家 幻化 详情 265250
+石之家 部队 5
+石之家 部队 星海 5
+石之家 部队 详情 12345
+石之家 签到
+石之家 自动签到 开启
+石之家 自动签到 关闭
+石之家 解绑
+```
+
+在私聊发送 `石之家 绑定` 后，机器人会返回 Chrome Console 脚本。石之家会话 Cookie 不允许网页脚本直接读取，因此脚本仅触发一条已登录的资料请求。随后在 Chrome 开发者工具 Network 中筛选 `getUserInfo`，右键该请求并明确选择 `Copy > Copy as cURL (bash)`（中文界面为“以 cURL (bash) 格式复制”），将完整 cURL 原样私聊发送给机器人即可完成绑定；插件会自动提取 Cookie 和登录 User-Agent。不要选择 cmd、PowerShell、fetch 或 Node.js 格式。若 Chrome 首次阻止粘贴，请先在 Console 输入 `allow pasting`。
+
+绑定会先验证账号是否已绑定角色。旧版只保存 Cookie 的绑定无法继续使用，需要按上面的流程重新绑定。自动签到默认关闭；开启后，插件会在 `Asia/Shanghai` 时区的配置时点执行，每个账号每天最多尝试一次。
+
+`石之家 我的` 返回当前绑定角色档案；`石之家 通知` 返回系统、评论、招募和粉丝等未读计数。
+
+`石之家 统计` 默认汇总当前角色有记录的战场、绝境、钓鱼、零式、幻化、蜃景幻界和深层迷宫数据。可指定 `战场`、`绝境`、`钓鱼`、`零式`、`幻化`、`蜃景` 或 `深层` 查询单项。
+
+`石之家 幻化` 查询投稿列表或按标题检索；使用 `装备` 可按装备名称检索相关投稿，使用 `详情` 加投稿 ID 可查看单条投稿。每条结果会单独发送首图、投稿信息和装备/染色清单。它优先使用私聊绑定信息；未绑定时可使用插件设置页配置的主人 `getUserInfo` cURL（bash）。
+
+`石之家 部队` 查询登录态可见的部队招待，支持按部队名称检索和按 ID 查看详情。它优先使用私聊绑定信息；未绑定时可使用插件设置页配置的主人 `getUserInfo` cURL（bash）。
 
 ### 招募
 
@@ -151,6 +204,8 @@ logs 角色名 服务器名 国际服
 | `use_global_fflogs` | `false` | `输出` 和 `logs` 默认查询国际服 FFLogs |
 | `font_path` | 空 | 文本转图片字体路径，留空时自动尝试 Linux 系统中文字体 |
 | `ffxiv_icon_font_path` | 空 | `招募` 卡片渲染 FFXIV 游戏内特殊图标字符时使用的本地图标字体路径 |
+| `risingstones_checkin_hour` | `8` | 已开启石之家自动签到的账号每日执行时点，使用 `Asia/Shanghai` 时区 |
+| `risingstones_owner_curl` | 空 | 主人填写 `getUserInfo` 请求的完整 cURL（bash）内容；用于幻化和部队招待等非个人信息查询，插件自动提取 Cookie 与登录 User-Agent |
 
 ### 字体建议
 
@@ -212,6 +267,7 @@ astrbot_plugin_tataru/
 - [Universalis](https://docs.universalis.app/)：市场板物价 API 数据源。
 - [艾欧泽亚售楼中心](https://house.ffxiv.cyou/)：房屋空房 API 数据源。
 - [FF14.org](https://ff14.org/duty)：副本攻略数据源。
+- [石之家](https://ff14risingstones.web.sdo.com/pc/index.html)：国服社区帖子和攻略数据源。
 - [Google Calendar](https://calendar.google.com/)：活动日历主数据源。
 - [iCloud Calendar](https://www.icloud.com/calendar/)：活动日历备用数据源。
 - [微博](https://weibo.com/1797798792)：FF14 官方微博数据源。

@@ -1,3 +1,4 @@
 aiohttp
+curl_cffi
 icalendar
 Pillow

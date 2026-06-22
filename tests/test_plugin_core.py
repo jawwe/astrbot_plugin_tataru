@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
@@ -59,6 +60,10 @@ def test_sensitive_debug_values_are_masked(plugin_module) -> None:
     assert plugin_module.sanitize_debug_url(
         "https://example.test/?token=abcdef"
     ).endswith("token=ab**ef")
+    assert (
+        plugin_module.sanitize_debug_value("curl sensitive-value", "curl")
+        == "cu****************ue"
+    )
 
 
 def test_proxy_settings_require_complete_authentication(plugin_module) -> None:
@@ -105,3 +110,314 @@ def test_proxy_host_rejects_embedded_port(plugin_module) -> None:
         }
     )
     assert plugin_module.proxy_request_options()["proxy"] == "http://[::1]:7890"
+
+
+def test_risingstones_posts_query_and_formatting(plugin_module) -> None:
+    """Keep public Rising Stones content lookups bounded and human-readable."""
+    query = plugin_module.parse_risingstones_posts_query("攻略 零式 99")
+    assert query.kind == "strat"
+    assert query.keyword == "零式"
+    assert query.limit == 20
+
+    text = plugin_module.format_risingstones_posts(
+        query,
+        [
+            {
+                "posts_id": 123,
+                "title": "零式攻略",
+                "part_name": "攻略",
+                "character_name": "塔塔露",
+                "area_name": "海猫茶屋",
+                "read_count": 120,
+                "comment_count": 4,
+                "like_count": 9,
+                "created_at": "2026-06-22 12:00:00",
+            }
+        ],
+    )
+    assert "【石之家攻略】 关键词：零式 数量：1" in text
+    assert "浏览：120 | 评论：4 | 点赞：9" in text
+    assert "#/strat/detail/123" in text
+
+
+def test_risingstones_recruit_query_and_formatting(plugin_module) -> None:
+    """Preserve public recruitment type selection and bounded output."""
+    query = plugin_module.parse_risingstones_recruit_query("副本 妖星乱舞 30")
+    assert query.kind == "party"
+    assert query.keyword == "妖星乱舞"
+    assert query.limit == 20
+
+    text = plugin_module.format_risingstones_recruits(
+        query,
+        [
+            {
+                "id": 53483,
+                "fb_name": "妖星乱舞绝境战",
+                "fb_type": "绝境战",
+                "character_name": "尹辞",
+                "area_name": "莫古力",
+                "group_name": "拂晓之间",
+                "fb_time": "晚8-12 2h",
+                "progress": "P3",
+                "strategy": "寿司优化",
+                "jobInfo": [{"value": "防护职业"}],
+                "updated_at": "2026-06-22 02:20:01",
+            }
+        ],
+    )
+    assert "【石之家招募】类型：副本 关键词：妖星乱舞 数量：1" in text
+    assert "需求：防护职业" in text
+    assert "#/recruit/party?id=53483" in text
+
+
+def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> None:
+    """Keep credentials isolated per account and auto check-ins bounded by day."""
+    store = plugin_module.RisingstonesAccountStore(tmp_path / "risingstones.sqlite3")
+    store.initialize()
+    credentials = plugin_module.RisingstonesCredentials(
+        cookie="ff14risingstones=abc", user_agent="Mozilla/5.0 Test"
+    )
+    store.set_credential("qq:10001", credentials)
+    assert store.get_credential("qq:10001") == "ff14risingstones=abc"
+    assert store.get_credentials("qq:10001") == credentials
+    assert store.due_auto_checkins("2026-06-22") == []
+
+    assert store.set_auto_checkin("qq:10001", True)
+    assert store.due_auto_checkins("2026-06-22") == [("qq:10001", credentials)]
+    store.mark_attempt("qq:10001", "2026-06-22")
+    assert store.due_auto_checkins("2026-06-22") == []
+    assert store.due_auto_checkins("2026-06-23") == [("qq:10001", credentials)]
+    assert store.remove("qq:10001")
+    assert store.get_credential("qq:10001") is None
+
+    assert (
+        plugin_module.normalize_risingstones_cookie(
+            "other=value; ff14risingstones=abc; trailing=value"
+        )
+        == "ff14risingstones=abc"
+    )
+    assert (
+        plugin_module.parse_risingstones_binding(
+            "ff14risingstones=abc | Mozilla/5.0 Test"
+        )
+        == credentials
+    )
+    curl_binding = """curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' \\
+  -H 'cookie: other=value; ff14risingstones=abc; trailing=value' \\
+  -H 'user-agent: Mozilla/5.0 Test'"""
+    assert plugin_module.parse_risingstones_curl_binding(curl_binding) == credentials
+    windows_curl_binding = r'''curl ^"https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo^" ^
+  -b ^"other=value; ff14risingstones=abc^%^3Avalue; trailing=value^" ^
+  -H ^"user-agent: Mozilla/5.0 Test^"'''
+    assert plugin_module.parse_risingstones_curl_binding(windows_curl_binding) == (
+        plugin_module.RisingstonesCredentials(
+            cookie="ff14risingstones=abc%3Avalue", user_agent="Mozilla/5.0 Test"
+        )
+    )
+    assert plugin_module.parse_risingstones_binding("ff14risingstones=abc") is None
+    assert (
+        plugin_module.configured_risingstones_credentials(
+            {
+                "risingstones_owner_curl": (
+                    "curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' "
+                    "-b 'other=value; ff14risingstones=abc' "
+                    "-H 'user-agent: Mozilla/5.0 Test'"
+                ),
+            }
+        )
+        == credentials
+    )
+    assert plugin_module.configured_risingstones_credentials(None) is None
+    guide = plugin_module.risingstones_binding_guide()
+    assert "getUserInfo" in guide
+    assert "Copy as cURL (bash)" in guide
+
+
+def test_risingstones_personal_actions_never_use_owner_cookie(
+    plugin_module, monkeypatch
+) -> None:
+    """Personal account data must be rejected before any global fallback is considered."""
+
+    class GroupEvent:
+        def is_private_chat(self) -> bool:
+            return False
+
+    plugin = object.__new__(plugin_module.TataruPlugin)
+    plugin.config = {
+        "risingstones_owner_curl": (
+            "curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' "
+            "-b 'ff14risingstones=owner' -H 'user-agent: Mozilla/5.0 Test'"
+        ),
+    }
+
+    async def no_glamour_rows(*_args, **_kwargs) -> list[dict]:
+        return []
+
+    monkeypatch.setattr(plugin_module, "risingstones_glamour_rows", no_glamour_rows)
+
+    personal_result = asyncio.run(
+        plugin.risingstones_private_action(GroupEvent(), "我的")
+    )
+    session_result = asyncio.run(
+        plugin.risingstones_private_action(GroupEvent(), "幻化")
+    )
+
+    assert "仅支持私聊" in personal_result
+    assert session_result == "没有找到符合条件的石之家幻化投稿。"
+
+
+def test_risingstones_private_response_formatting(plugin_module) -> None:
+    """Render private profile and notification payloads without raw identifiers."""
+    profile = plugin_module.format_risingstones_profile(
+        {
+            "character_name": "塔塔露",
+            "area_name": "陆行鸟",
+            "group_name": "红玉海",
+            "experience": 120,
+            "followFansiNum": {"followNum": 3, "fansNum": 4},
+            "beLikedNum": 5,
+            "characterDetail": [{"play_time": "100小时"}],
+        }
+    )
+    assert "【石之家档案】塔塔露 @ 陆行鸟@红玉海" in profile
+    assert "游戏时长：100小时" in profile
+
+    notifications = plugin_module.format_risingstones_notifications(
+        {"sysNum": "2", "commentMsgNum": 1, "newFensNum": 3}
+    )
+    assert "系统消息：2" in notifications
+    assert "评论：1" in notifications
+    assert "新粉丝：3" in notifications
+
+
+def test_risingstones_glamour_action_returns_individual_messages(
+    plugin_module, monkeypatch
+) -> None:
+    """Each glamour result should carry its own image and formatted equipment text."""
+
+    class GroupEvent:
+        def is_private_chat(self) -> bool:
+            return False
+
+    plugin = object.__new__(plugin_module.TataruPlugin)
+    plugin.config = {
+        "risingstones_owner_curl": (
+            "curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' "
+            "-b 'ff14risingstones=owner' -H 'user-agent: Mozilla/5.0 Test'"
+        ),
+    }
+
+    async def glamour_rows(*_args, **_kwargs) -> list[dict]:
+        return [
+            {
+                "id": 265250,
+                "title": "夏日白衣",
+                "main_image": "https://example.com/glamour.jpg",
+                "equipments": [{"slot": "BODY", "name": "夏暮沙滩罩衫"}],
+            }
+        ]
+
+    monkeypatch.setattr(plugin_module, "risingstones_glamour_rows", glamour_rows)
+    response = asyncio.run(plugin.risingstones_private_action(GroupEvent(), "幻化"))
+
+    assert isinstance(response, plugin_module.RisingstonesGlamourResponse)
+    assert len(response.messages) == 1
+    assert response.messages[0].image_url == "https://example.com/glamour.jpg"
+    assert "上衣：夏暮沙滩罩衫" in response.messages[0].text
+
+
+def test_risingstones_statistics_formatting(plugin_module) -> None:
+    """Only verified statistic fields should be included in summary output."""
+    assert plugin_module.parse_risingstones_stat_kind("零式") == "savage"
+    assert plugin_module.risingstones_stat_lines(
+        "savage", {"territory_num": 4, "enter_num": 10, "finish_times": 2}
+    ) == ["已记录副本数：4个", "进入次数：10次", "完成次数：2次"]
+    text = plugin_module.format_risingstones_statistics(
+        {"savage": ["已记录副本数：4个"]}
+    )
+    assert "[零式数据]" in text
+
+
+def test_risingstones_glamour_query_and_formatting(plugin_module) -> None:
+    """Support list, equipment and detail lookup forms without leaking payloads."""
+    query = plugin_module.parse_risingstones_glamour_query("装备 纯白长袍 30")
+    assert query.mode == "equipment"
+    assert query.value == "纯白长袍"
+    assert query.limit == 20
+
+    detail = plugin_module.parse_risingstones_glamour_query("详情 265250")
+    assert detail.mode == "detail"
+    assert detail.value == "265250"
+
+    text = plugin_module.format_risingstones_glamour(
+        query,
+        [
+            {
+                "id": 265250,
+                "title": "夏日白衣",
+                "character_name": "塔塔露",
+                "area_name": "陆行鸟",
+                "group_name": "红玉海",
+                "desc": "清爽搭配",
+                "likes": 12,
+                "favorites": 3,
+            }
+        ],
+    )
+    assert "【石之家幻化】装备检索 数量：1" in text
+    assert "点赞：12 | 收藏：3" in text
+    assert "#/glamour/detail/265250" in text
+
+    message = plugin_module.format_risingstones_glamour_message(
+        query,
+        {
+            "id": 265250,
+            "title": "夏日白衣",
+            "character_name": "塔塔露",
+            "main_image": "https://example.com/glamour.jpg",
+            "equipments": [
+                {
+                    "slot": "BODY",
+                    "name": "夏暮沙滩罩衫",
+                    "dyes": [{"name": "柔彩粉染剂"}, {"name": "煤烟黑染剂"}],
+                }
+            ],
+        },
+        1,
+        1,
+    )
+    assert message.image_url == "https://example.com/glamour.jpg"
+    assert "装备：\n上衣：夏暮沙滩罩衫（柔彩粉染剂 / 煤烟黑染剂）" in message.text
+
+
+def test_risingstones_guild_query_and_formatting(plugin_module) -> None:
+    """Render private guild recruitment list and detail URLs consistently."""
+    query = plugin_module.parse_risingstones_guild_query("星海 50")
+    assert query.mode == "list"
+    assert query.value == "星海"
+    assert query.limit == 20
+    detail = plugin_module.parse_risingstones_guild_query("详情 12345")
+    assert detail.mode == "detail"
+    assert detail.value == "12345"
+
+    text = plugin_module.format_risingstones_guilds(
+        query,
+        [
+            {
+                "id": 12345,
+                "guild_name": "星海旅团",
+                "character_name": "塔塔露",
+                "area_name": "陆行鸟",
+                "group_name": "红玉海",
+                "target_area_name": "陆行鸟",
+                "target_group_name": "红玉海",
+                "labelInfo": [{"name": "休闲"}],
+                "active_member_num": "6-20",
+                "weekday_time": "20:00-23:00",
+                "detail_mask": "欢迎加入",
+            }
+        ],
+    )
+    assert "【石之家部队招待】数量：1" in text
+    assert "标签：休闲" in text
+    assert "#/recruit/guild/detail/12345" in text

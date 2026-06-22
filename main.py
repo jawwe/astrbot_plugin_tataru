@@ -9,11 +9,15 @@ import itertools
 import json
 import random
 import re
+import sqlite3
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 import aiohttp
+from curl_cffi import requests as curl_requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 import astrbot.api.message_components as Comp
@@ -75,6 +79,7 @@ SENSITIVE_DEBUG_KEYWORDS = (
     "secret",
     "password",
     "credential",
+    "curl",
     "api_key",
     "apikey",
     "proxy_auth",
@@ -325,6 +330,21 @@ PARTY_FINDER_API_V1_URL = "https://xivpf.littlenightmare.top/api/listings"
 PARTY_FINDER_API_V2_URL = "https://xivpf.littlenightmare.top/api/v2/listings"
 XIVAPI_BASE_URL = "https://xivapi-v2.xivcdn.com/api"
 HOUSE_API_URL = "https://house.ffxiv.cyou/api/sales"
+RISINGSTONES_API_BASE = "https://apiff14risingstones.web.sdo.com/api"
+RISINGSTONES_WEB_BASE = "https://ff14risingstones.web.sdo.com/pc/index.html"
+RISINGSTONES_DEFAULT_LIMIT = 10
+RISINGSTONES_MAX_LIMIT = 20
+RISINGSTONES_DB_PATH = DATA_DIR / "risingstones.sqlite3"
+RISINGSTONES_TIMEZONE = ZoneInfo("Asia/Shanghai")
+RISINGSTONES_IMPERSONATE = "chrome124"
+RISINGSTONES_BINDING_SEPARATOR = " | "
+RISINGSTONES_CONSOLE_SCRIPT = """fetch(
+  'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo',
+  { credentials: 'include' },
+)
+  .then((response) => response.text())
+  .then(() => console.log('请求已发出：请在 Network 中筛选 getUserInfo，右键该请求并选择 Copy > Copy as cURL (bash)。'))
+  .catch((error) => console.error('请求触发失败：', error));"""
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
 CN_WORLD_NAME_CACHE: dict[str, dict] | None = None
@@ -628,6 +648,179 @@ class HouseQuery:
     ward: int | None
     plot_id: int | None
     limit: int
+
+
+@dataclass
+class RisingstonesPostsQuery:
+    kind: str
+    keyword: str | None
+    page: int
+    limit: int
+
+
+@dataclass
+class RisingstonesRecruitQuery:
+    kind: str
+    keyword: str | None
+    page: int
+    limit: int
+
+
+@dataclass
+class RisingstonesGlamourQuery:
+    mode: str
+    value: str | None
+    limit: int
+
+
+@dataclass
+class RisingstonesGuildQuery:
+    mode: str
+    value: str | None
+    limit: int
+
+
+@dataclass(frozen=True)
+class RisingstonesCredentials:
+    cookie: str
+    user_agent: str
+
+
+@dataclass(frozen=True)
+class RisingstonesGlamourMessage:
+    text: str
+    image_url: str | None
+
+
+@dataclass(frozen=True)
+class RisingstonesGlamourResponse:
+    messages: list[RisingstonesGlamourMessage]
+
+
+class RisingstonesAccountStore:
+    """Small per-user SQLite store for private Rising Stones credentials."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS risingstones_accounts (
+                    account_key TEXT PRIMARY KEY,
+                    credential TEXT NOT NULL,
+                    user_agent TEXT NOT NULL DEFAULT '',
+                    auto_checkin INTEGER NOT NULL DEFAULT 0,
+                    last_checkin_date TEXT,
+                    last_attempt_date TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(risingstones_accounts)"
+                )
+            }
+            if "user_agent" not in columns:
+                connection.execute(
+                    "ALTER TABLE risingstones_accounts ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''"
+                )
+
+    def set_credential(
+        self, account_key: str, credentials: RisingstonesCredentials
+    ) -> None:
+        now = datetime.now(RISINGSTONES_TIMEZONE).isoformat(timespec="seconds")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                INSERT INTO risingstones_accounts (
+                    account_key, credential, user_agent, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(account_key) DO UPDATE SET
+                    credential = excluded.credential,
+                    user_agent = excluded.user_agent,
+                    updated_at = excluded.updated_at
+                """,
+                (account_key, credentials.cookie, credentials.user_agent, now),
+            )
+
+    def get_credential(self, account_key: str) -> str | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT credential FROM risingstones_accounts WHERE account_key = ?",
+                (account_key,),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def get_credentials(self, account_key: str) -> RisingstonesCredentials | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT credential, user_agent
+                FROM risingstones_accounts
+                WHERE account_key = ?
+                """,
+                (account_key,),
+            ).fetchone()
+        if not row or not row[0] or not row[1]:
+            return None
+        return RisingstonesCredentials(cookie=str(row[0]), user_agent=str(row[1]))
+
+    def remove(self, account_key: str) -> bool:
+        with sqlite3.connect(self.path) as connection:
+            cursor = connection.execute(
+                "DELETE FROM risingstones_accounts WHERE account_key = ?",
+                (account_key,),
+            )
+        return cursor.rowcount > 0
+
+    def set_auto_checkin(self, account_key: str, enabled: bool) -> bool:
+        with sqlite3.connect(self.path) as connection:
+            cursor = connection.execute(
+                "UPDATE risingstones_accounts SET auto_checkin = ? WHERE account_key = ?",
+                (int(enabled), account_key),
+            )
+        return cursor.rowcount > 0
+
+    def due_auto_checkins(self, day: str) -> list[tuple[str, RisingstonesCredentials]]:
+        with sqlite3.connect(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT account_key, credential, user_agent
+                FROM risingstones_accounts
+                WHERE auto_checkin = 1
+                  AND (last_attempt_date IS NULL OR last_attempt_date != ?)
+                """,
+                (day,),
+            ).fetchall()
+        return [
+            (
+                str(account_key),
+                RisingstonesCredentials(cookie=str(cookie), user_agent=str(user_agent)),
+            )
+            for account_key, cookie, user_agent in rows
+            if cookie and user_agent
+        ]
+
+    def mark_attempt(self, account_key: str, day: str) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE risingstones_accounts SET last_attempt_date = ? WHERE account_key = ?",
+                (day, account_key),
+            )
+
+    def mark_checkin(self, account_key: str, day: str) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE risingstones_accounts SET last_checkin_date = ? WHERE account_key = ?",
+                (day, account_key),
+            )
 
 
 @dataclass
@@ -1491,6 +1684,10 @@ def create_help_text() -> str:
 [仙人彩] 帮你选每周仙人仙彩数字
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
+[石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
+[石之家 幻化/部队] 使用主人登录信息或私聊绑定查询登录态内容
+[石之家 绑定] 私聊获取 Chrome 控制台绑定脚本
+[石之家 我的/通知/统计/签到/自动签到 开启/关闭/解绑] 仅私聊个人账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
 [物品 物品名] 查询物品信息
@@ -1572,6 +1769,1127 @@ def strip_html(text: str) -> str:
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = re.sub(r"<.*?>", "", text)
     return html.unescape(text).strip()
+
+
+def parse_risingstones_posts_query(value: str) -> RisingstonesPostsQuery:
+    """Parse the public Rising Stones post and strategy lookup syntax."""
+    parts = value.split()
+    kind = "post"
+    if parts:
+        kind_aliases = {
+            "帖子": "post",
+            "社区": "post",
+            "post": "post",
+            "攻略": "strat",
+            "战略": "strat",
+            "strat": "strat",
+        }
+        resolved_kind = kind_aliases.get(parts[0].lower())
+        if resolved_kind:
+            kind = resolved_kind
+            parts = parts[1:]
+
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    keyword = " ".join(parts).strip() or None
+    return RisingstonesPostsQuery(kind=kind, keyword=keyword, page=1, limit=limit)
+
+
+def risingstones_content_url(kind: str, post_id: object) -> str:
+    route = "strat" if kind == "strat" else "post"
+    return f"{RISINGSTONES_WEB_BASE}#/{route}/detail/{quote(str(post_id or ''))}"
+
+
+async def fetch_risingstones_posts(query: RisingstonesPostsQuery) -> list[dict]:
+    """Fetch public Rising Stones posts using the website's browser request shape."""
+    content_type = "2" if query.kind == "strat" else "1"
+    if query.keyword:
+        endpoint = "/common/search"
+        params = {
+            "type": content_type,
+            "keywords": query.keyword,
+            "page": query.page,
+            "limit": query.limit,
+            "part_id": "",
+            "orderBy": "comment",
+            "pageTime": "",
+        }
+    else:
+        endpoint = "/home/posts/postsList"
+        params = {
+            "type": content_type,
+            "page": query.page,
+            "limit": query.limit,
+            "is_top": "0",
+            "is_refine": "0",
+            "part_id": "",
+            "hotType": "postsHotNow" if query.kind == "post" else "",
+            "order": "",
+        }
+    response = await aiohttp_request(
+        "GET",
+        f"{RISINGSTONES_API_BASE}{endpoint}?{urlencode(params)}",
+        timeout_seconds=20,
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Referer": RISINGSTONES_WEB_BASE,
+        },
+    )
+    if response.status != 200 or not isinstance(response.payload, dict):
+        raise RuntimeError(f"石之家请求失败: HTTP {response.status}")
+    payload = response.payload
+    if payload.get("code") not in {0, 10000}:
+        raise RuntimeError(f"石之家接口返回异常: {payload.get('msg') or '未知错误'}")
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    return (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+
+
+def risingstones_number(value: object) -> int | None:
+    try:
+        return int(value) if value not in {None, ""} else None
+    except (TypeError, ValueError):
+        return None
+
+
+def format_risingstones_posts(query: RisingstonesPostsQuery, rows: list[dict]) -> str:
+    """Format public community content as a bounded chat response."""
+    kind_label = "攻略" if query.kind == "strat" else "帖子"
+    keyword_label = f" 关键词：{query.keyword}" if query.keyword else ""
+    lines = [f"【石之家{kind_label}】{keyword_label} 数量：{len(rows)}"]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        post_id = row.get("posts_id") or row.get("id")
+        title = str(row.get("title") or "未命名内容").strip()
+        category = str(row.get("part_name") or "未分类").strip()
+        author = str(row.get("character_name") or "未知作者").strip()
+        server = str(row.get("area_name") or "未知服务器").strip()
+        created_at = str(row.get("created_at") or "未知时间").strip()
+        metrics = []
+        for label, field in (
+            ("浏览", "read_count"),
+            ("评论", "comment_count"),
+            ("点赞", "like_count"),
+        ):
+            number = risingstones_number(row.get(field))
+            if number is not None:
+                metrics.append(f"{label}：{number}")
+        lines.extend(
+            [
+                f"\n{index:02d}. {title}",
+                f"[{category}] {author} @ {server}",
+                " | ".join([*metrics, created_at]),
+                risingstones_content_url(query.kind, post_id),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def parse_risingstones_recruit_query(value: str) -> RisingstonesRecruitQuery:
+    """Parse public Rising Stones recruitment lookup syntax."""
+    parts = value.split()
+    kind = "party"
+    if parts:
+        kind_aliases = {
+            "副本": "party",
+            "队伍": "party",
+            "party": "party",
+            "萌新": "beginner",
+            "新手": "beginner",
+            "beginner": "beginner",
+            "其他": "other",
+            "other": "other",
+            "rp": "rp",
+            "角色扮演": "rp",
+        }
+        resolved_kind = kind_aliases.get(parts[0].lower())
+        if resolved_kind:
+            kind = resolved_kind
+            parts = parts[1:]
+
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    keyword = " ".join(parts).strip() or None
+    return RisingstonesRecruitQuery(kind=kind, keyword=keyword, page=1, limit=limit)
+
+
+def risingstones_recruit_list_spec(kind: str) -> tuple[str, str | None]:
+    specs = {
+        "party": ("/home/recruit/recruitFbList", "fb_name"),
+        "beginner": ("/home/recruit/recruitNeList", None),
+        "other": ("/home/recruit/recruitOtherList", None),
+        "rp": ("/home/recruit/recruitRpList", "rp_name"),
+    }
+    return specs[kind]
+
+
+async def fetch_risingstones_recruits(query: RisingstonesRecruitQuery) -> list[dict]:
+    """Fetch one public Rising Stones recruitment list with browser headers."""
+    endpoint, keyword_field = risingstones_recruit_list_spec(query.kind)
+    params: dict[str, str | int] = {"page": query.page, "limit": query.limit}
+    if keyword_field and query.keyword:
+        params[keyword_field] = query.keyword
+    response = await aiohttp_request(
+        "GET",
+        f"{RISINGSTONES_API_BASE}{endpoint}?{urlencode(params)}",
+        timeout_seconds=20,
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Referer": RISINGSTONES_WEB_BASE,
+        },
+    )
+    if response.status != 200 or not isinstance(response.payload, dict):
+        raise RuntimeError(f"石之家招募请求失败: HTTP {response.status}")
+    payload = response.payload
+    if payload.get("code") not in {0, 10000}:
+        raise RuntimeError(
+            f"石之家招募接口返回异常: {payload.get('msg') or '未知错误'}"
+        )
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    result = (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+    if query.keyword and not keyword_field:
+        keyword = query.keyword.lower()
+        result = [
+            row
+            for row in result
+            if keyword
+            in " ".join(
+                str(row.get(field) or "")
+                for field in ("title", "detail_mask", "profile", "category_name")
+            ).lower()
+        ]
+    return result
+
+
+def risingstones_recruit_url(kind: str, recruit_id: object) -> str:
+    route = {
+        "party": "party",
+        "beginner": "beginner",
+        "other": "others",
+        "rp": "roleplay",
+    }[kind]
+    return f"{RISINGSTONES_WEB_BASE}#/recruit/{route}?id={quote(str(recruit_id or ''))}"
+
+
+def risingstones_recruit_text(kind: str, row: dict) -> tuple[str, str, str]:
+    if kind == "party":
+        title = str(row.get("fb_name") or "未命名副本招募").strip()
+        category = str(row.get("fb_type") or "副本招募").strip()
+        job_values = [
+            str(item.get("value")).strip()
+            for item in row.get("jobInfo", [])
+            if isinstance(item, dict) and item.get("value")
+        ]
+        detail = " | ".join(
+            text
+            for text in (
+                str(row.get("fb_time") or "").strip(),
+                str(row.get("progress") or "").strip(),
+                str(row.get("strategy") or "").strip(),
+                f"需求：{'、'.join(job_values)}" if job_values else "",
+            )
+            if text
+        )
+    elif kind == "beginner":
+        title = str(row.get("title") or "未命名萌新招待").strip()
+        styles = [
+            str(item.get("name")).strip()
+            for item in row.get("styleInfo", [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+        category = " / ".join(styles) or str(row.get("identity") or "萌新招待")
+        detail = " | ".join(
+            text
+            for text in (
+                str(row.get("weekday_time") or "").strip(),
+                str(row.get("weekend_time") or "").strip(),
+                strip_html(str(row.get("detail_mask") or "")),
+            )
+            if text
+        )
+    elif kind == "other":
+        title = str(row.get("title") or "未命名其他招募").strip()
+        category = str(row.get("category_name") or "其他招募").strip()
+        detail = strip_html(str(row.get("detail_mask") or ""))
+    else:
+        title = str(row.get("rp_name") or "未命名 RP 招募").strip()
+        category = str(row.get("rp_type") or "RP 招募").strip()
+        detail = " | ".join(
+            text
+            for text in (
+                str(row.get("open_time") or "").strip(),
+                strip_html(str(row.get("profile") or "")),
+            )
+            if text
+        )
+    return title, category, detail
+
+
+def format_risingstones_recruits(
+    query: RisingstonesRecruitQuery, rows: list[dict]
+) -> str:
+    """Format public Rising Stones recruitment results for a chat response."""
+    kind_labels = {"party": "副本", "beginner": "萌新", "other": "其他", "rp": "RP"}
+    keyword_label = f" 关键词：{query.keyword}" if query.keyword else ""
+    lines = [
+        f"【石之家招募】类型：{kind_labels[query.kind]}{keyword_label} 数量：{len(rows)}"
+    ]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        title, category, detail = risingstones_recruit_text(query.kind, row)
+        author = str(row.get("character_name") or "未知发布者").strip()
+        server = "@".join(
+            part
+            for part in (
+                str(row.get("area_name") or "").strip(),
+                str(row.get("group_name") or "").strip(),
+            )
+            if part
+        )
+        updated_at = str(
+            row.get("updated_at") or row.get("sort_updated_time") or ""
+        ).strip()
+        lines.extend(
+            [
+                f"\n{index:02d}. [{category}] {title}",
+                f"{author}{f' @ {server}' if server else ''}",
+                detail[:500] if detail else "暂无说明",
+                updated_at,
+                risingstones_recruit_url(query.kind, row.get("id")),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def normalize_risingstones_cookie(value: str) -> str:
+    """Keep only the session cookie required by the Rising Stones API."""
+    text = value.strip()
+    if text.lower().startswith("cookie:"):
+        text = text.split(":", 1)[1].strip()
+    for item in text.split(";"):
+        candidate = item.strip()
+        if candidate.startswith("ff14risingstones="):
+            return candidate
+    return ""
+
+
+def parse_risingstones_binding(value: str) -> RisingstonesCredentials | None:
+    """Parse a legacy cookie/UA pair or Chrome's copied cURL request."""
+    curl_credentials = parse_risingstones_curl_binding(value)
+    if curl_credentials:
+        return curl_credentials
+    cookie_text, separator, user_agent = value.partition(RISINGSTONES_BINDING_SEPARATOR)
+    cookie = normalize_risingstones_cookie(cookie_text)
+    user_agent = user_agent.strip() if separator else ""
+    if not cookie or not user_agent:
+        return None
+    return RisingstonesCredentials(cookie=cookie, user_agent=user_agent)
+
+
+def parse_risingstones_curl_binding(value: str) -> RisingstonesCredentials | None:
+    """Extract cookie and UA from Chrome DevTools' Copy as cURL output."""
+    # Chrome's Windows command format escapes shell-sensitive characters with
+    # carets and puts the Cookie in `-b` instead of a request header.
+    normalized = re.sub(r"\^([\"%&])", r"\1", value)
+    headers = re.findall(r"(?:-H|--header)\s+['\"]([^'\"]+)['\"]", normalized)
+    values: dict[str, str] = {}
+    for header in headers:
+        name, separator, header_value = header.partition(":")
+        if separator:
+            values[name.strip().lower()] = header_value.strip()
+    cookie_match = re.search(r"(?:-b|--cookie)\s+['\"]([^'\"]+)['\"]", normalized)
+    cookie_value = values.get("cookie", "")
+    if cookie_match:
+        cookie_value = cookie_match.group(1)
+    cookie_value = cookie_value.replace("^", "")
+    cookie = normalize_risingstones_cookie(cookie_value)
+    user_agent = values.get("user-agent", "").strip()
+    if not cookie or not user_agent:
+        return None
+    return RisingstonesCredentials(cookie=cookie, user_agent=user_agent)
+
+
+def risingstones_binding_guide() -> str:
+    return (
+        "石之家 Cookie 不允许网页脚本直接读取，因此请按以下步骤获取登录信息：\n"
+        "1. 保持石之家网页登录，按 F12 打开开发者工具并切到 Console。\n"
+        "2. 粘贴并运行下方脚本，再切到 Network。\n"
+        "3. 筛选 `getUserInfo`，右键该请求，选择 Copy > Copy as cURL (bash)。\n"
+        "4. 将完整 cURL 内容私聊发送：石之家 绑定 <完整 cURL>\n\n"
+        "```javascript\n"
+        f"{RISINGSTONES_CONSOLE_SCRIPT}\n"
+        "```\n"
+        "如果 Chrome 阻止粘贴，请先在 Console 输入 allow pasting。"
+    )
+
+
+def configured_risingstones_credentials(
+    config: dict | None,
+) -> RisingstonesCredentials | None:
+    """Read operator credentials from the full Chrome cURL configuration."""
+    config = config or {}
+    curl_value = str(config.get("risingstones_owner_curl", "") or "").strip()
+    if curl_value:
+        if "getUserInfo" not in curl_value:
+            return None
+        return parse_risingstones_curl_binding(curl_value)
+
+    # Keep legacy paired values functional for existing installations. New
+    # configuration uses `risingstones_owner_curl` exclusively.
+    cookie = normalize_risingstones_cookie(
+        str(config.get("risingstones_cookie", "") or "")
+    )
+    user_agent = str(config.get("risingstones_user_agent", "") or "").strip()
+    if not cookie or not user_agent:
+        return None
+    return RisingstonesCredentials(cookie=cookie, user_agent=user_agent)
+
+
+def risingstones_proxy_url() -> str | None:
+    """Convert the shared proxy configuration into curl_cffi's proxy URL."""
+    options = proxy_request_options()
+    proxy_url = options.get("proxy")
+    proxy_auth = options.get("proxy_auth")
+    if not proxy_url:
+        return None
+    if not proxy_auth:
+        return str(proxy_url)
+    parsed = urlsplit(str(proxy_url))
+    username = quote(str(proxy_auth.login), safe="")
+    password = quote(str(proxy_auth.password), safe="")
+    return urlunsplit(
+        (parsed.scheme, f"{username}:{password}@{parsed.netloc}", parsed.path, "", "")
+    )
+
+
+def risingstones_account_key(event: AstrMessageEvent) -> str | None:
+    platform_id = str(event.get_platform_id() or "").strip()
+    sender_id = str(event.get_sender_id() or "").strip()
+    if not platform_id or not sender_id:
+        return None
+    return f"{platform_id}:{sender_id}"
+
+
+def is_risingstones_private_event(event: AstrMessageEvent) -> bool:
+    checker = getattr(event, "is_private_chat", None)
+    return bool(checker and checker())
+
+
+async def risingstones_account_request(
+    credentials: RisingstonesCredentials,
+    method: str,
+    endpoint: str,
+    *,
+    params: dict[str, str] | None = None,
+    data: dict[str, str] | None = None,
+) -> dict:
+    """Call a private API with the login UA and Chrome-like TLS fingerprint."""
+    proxy_url = risingstones_proxy_url()
+    request_id = next(HTTP_REQUEST_COUNTER)
+    debug_log(
+        "risingstones.request.start",
+        proxy_used=bool(proxy_url),
+        request_id=request_id,
+        method=method.upper(),
+        endpoint=endpoint,
+        has_body=bool(data),
+    )
+    request_kwargs = {
+        "params": params,
+        "data": data,
+        "timeout": 20,
+    }
+    if proxy_url:
+        request_kwargs["proxy"] = proxy_url
+    try:
+        async with curl_requests.AsyncSession(
+            impersonate=RISINGSTONES_IMPERSONATE,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": RISINGSTONES_WEB_BASE,
+                "User-Agent": credentials.user_agent,
+                "Cookie": credentials.cookie,
+            },
+        ) as session:
+            response = await session.request(
+                method, f"{RISINGSTONES_API_BASE}{endpoint}", **request_kwargs
+            )
+    except Exception as exc:
+        debug_log(
+            "risingstones.request.error",
+            proxy_used=bool(proxy_url),
+            request_id=request_id,
+            error_type=type(exc).__name__,
+        )
+        raise RuntimeError("石之家请求连接失败") from exc
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"石之家响应解析失败: HTTP {response.status_code}") from exc
+    debug_log(
+        "risingstones.request.finish",
+        proxy_used=bool(proxy_url),
+        request_id=request_id,
+        status=response.status_code,
+    )
+    if response.status_code != 200 or not isinstance(payload, dict):
+        raise RuntimeError(f"石之家请求失败: HTTP {response.status_code}")
+    if payload.get("code") not in {0, 10000, 10001}:
+        message = str(payload.get("msg") or "未知错误")
+        if (
+            payload.get("code") == 10403
+            or "登录" in message
+            or "token" in message.lower()
+        ):
+            raise RuntimeError("石之家凭据已失效，请在私聊中重新绑定")
+        raise RuntimeError(f"石之家接口返回异常: {message}")
+    return payload
+
+
+async def risingstones_verify_credential(credentials: RisingstonesCredentials) -> dict:
+    payload = await risingstones_account_request(
+        credentials, "GET", "/home/userInfo/getUserInfo"
+    )
+    data = payload.get("data")
+    if not isinstance(data, dict) or not data.get("character_name"):
+        raise RuntimeError("石之家凭据有效，但账号未绑定角色")
+    return data
+
+
+async def risingstones_checkin(
+    credentials: RisingstonesCredentials,
+) -> tuple[bool, str]:
+    tempsuid = str(uuid.uuid4())
+    payload = await risingstones_account_request(
+        credentials,
+        "POST",
+        "/home/sign/signIn",
+        params={"tempsuid": tempsuid},
+        data={"tempsuid": tempsuid},
+    )
+    if payload.get("code") == 10000:
+        return True, str(payload.get("msg") or "签到成功")
+    return True, str(payload.get("msg") or "今日已签到")
+
+
+def format_risingstones_profile(data: dict) -> str:
+    """Format the currently bound Rising Stones character profile."""
+    character_name = str(data.get("character_name") or "未知角色").strip()
+    server = "@".join(
+        part
+        for part in (
+            str(data.get("area_name") or "").strip(),
+            str(data.get("group_name") or "").strip(),
+        )
+        if part
+    )
+    details = data.get("characterDetail")
+    detail = details[0] if isinstance(details, list) and details else {}
+    follows = (
+        data.get("followFansiNum")
+        if isinstance(data.get("followFansiNum"), dict)
+        else {}
+    )
+    lines = [f"【石之家档案】{character_name}{f' @ {server}' if server else ''}"]
+    metrics = (
+        ("经验", data.get("experience")),
+        ("关注", follows.get("followNum")),
+        ("粉丝", follows.get("fansNum")),
+        ("获赞", data.get("beLikedNum")),
+    )
+    lines.extend(
+        f"{label}：{value}" for label, value in metrics if value not in {None, ""}
+    )
+    for label, field in (
+        ("创建时间", "create_time"),
+        ("上次登录", "last_login_time"),
+        ("游戏时长", "play_time"),
+    ):
+        value = detail.get(field) if isinstance(detail, dict) else None
+        if value not in {None, ""}:
+            lines.append(f"{label}：{value}")
+    return "\n".join(lines)
+
+
+RISINGSTONES_NOTIFICATION_FIELDS = (
+    ("系统消息", "sysNum"),
+    ("@ 我的", "atMsgNum"),
+    ("评论", "commentMsgNum"),
+    ("赞和收藏", "beLikedMsgNum"),
+    ("我的招募", "recruitTip"),
+    ("副本招募", "recruitFbTip"),
+    ("部队招待", "recruitGuildTip"),
+    ("萌新招待", "recruitNeTip"),
+    ("其他招募", "recruitOtherTip"),
+    ("新粉丝", "newFensNum"),
+)
+
+RISINGSTONES_STAT_KIND_ALIASES = {
+    "全部": "all",
+    "all": "all",
+    "战场": "frontline",
+    "frontline": "frontline",
+    "绝境": "ultimate",
+    "ultimate": "ultimate",
+    "钓鱼": "fishing",
+    "fishing": "fishing",
+    "零式": "savage",
+    "savage": "savage",
+    "幻化": "glamour",
+    "glamour": "glamour",
+    "蜃景": "occult",
+    "occult": "occult",
+    "深层": "deepdungeon",
+    "深层迷宫": "deepdungeon",
+    "deepdungeon": "deepdungeon",
+}
+RISINGSTONES_STAT_LABELS = {
+    "frontline": "战场数据",
+    "ultimate": "绝境战数据",
+    "fishing": "钓鱼数据",
+    "savage": "零式数据",
+    "glamour": "幻化/武具投影数据",
+    "occult": "蜃景幻界数据",
+    "deepdungeon": "深层迷宫数据",
+}
+
+
+def parse_risingstones_stat_kind(value: str) -> str:
+    return RISINGSTONES_STAT_KIND_ALIASES.get(value.strip().lower(), "all")
+
+
+def risingstones_first_data_row(data: object) -> dict | None:
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        return next((item for item in data if isinstance(item, dict)), None)
+    return None
+
+
+def risingstones_stat_lines(kind: str, data: object) -> list[str]:
+    """Normalize the verified statistic summary fields without inventing values."""
+    row = risingstones_first_data_row(data)
+    if kind == "ultimate" and isinstance(data, list):
+        lines = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            territory = str(
+                item.get("territory_name") or item.get("territory_type") or "绝境战"
+            )
+            clear_times = item.get("clear_times")
+            dead_times = item.get("dead_times")
+            job_name = item.get("job_name")
+            parts = []
+            if clear_times not in {None, ""}:
+                parts.append(f"通关：{clear_times}")
+            if dead_times not in {None, ""}:
+                parts.append(f"倒地：{dead_times}")
+            if job_name:
+                parts.append(str(job_name))
+            if parts:
+                lines.append(f"{territory}：{' | '.join(parts)}")
+        return lines
+    if not row:
+        return []
+
+    fields = {
+        "frontline": (
+            ("参战次数", "fight_times", "次"),
+            ("胜利次数", "win_times", "次"),
+            ("胜率", "win_rate", "%"),
+            ("KDA", "kda", ""),
+            ("击倒数", "kill_times", "次"),
+            ("助攻数", "assist_times", "次"),
+            ("倒地数", "dead_times", "次"),
+        ),
+        "fishing": (
+            ("钓鱼次数", "total_times", "次"),
+            ("成功率", "succ_rate", "%"),
+            ("出海次数", "sea_times", "次"),
+            ("最高出海分数", "max_sea_score", "分"),
+        ),
+        "savage": (
+            ("已记录副本数", "territory_num", "个"),
+            ("进入次数", "enter_num", "次"),
+            ("完成次数", "finish_times", "次"),
+            ("累计耗时", "elapsed_time", "分钟"),
+        ),
+        "glamour": (
+            ("使用幻想药次数", "washing_num", "次"),
+            ("已套装幻影化数量", "set_num", "套"),
+            ("装备使用染剂数", "color_times", "种"),
+            ("武具投影次数", "vanity_times", "次"),
+        ),
+        "occult": (
+            ("当前等级", "now_level", "级"),
+            ("FATE 完成次数", "fate_times", "次"),
+            ("CE 完成次数", "ce_times", "次"),
+        ),
+        "deepdungeon": (
+            ("通关次数", "clear_times", "次"),
+            ("魔器武器等级", "weapon_level", ""),
+            ("魔器防具等级", "armor_level", ""),
+            ("强化等级", "enchantedLevel", ""),
+        ),
+    }
+    return [
+        f"{label}：{row[field]}{unit}"
+        for label, field, unit in fields.get(kind, ())
+        if row.get(field) not in {None, ""}
+    ]
+
+
+async def risingstones_statistics(
+    credentials: RisingstonesCredentials, kind: str
+) -> dict[str, list[str]]:
+    endpoints = {
+        "frontline": ("/home/dataCenter/frontline1TotalNew", None),
+        "ultimate": ("/home/dataCenter/gaoNanFirst1", None),
+        "fishing": ("/home/dataCenter/fishTotal1", None),
+        "savage": ("/home/dataCenter/getLingShiTotal", None),
+        "glamour": ("/home/dataCenter/getDressTotal7", None),
+        "occult": ("/home/dataCenter/getMKDTotal1", None),
+        "deepdungeon": ("/home/dataCenter/getDDTerr1", {"dd_type": "dd4"}),
+    }
+    kinds = list(endpoints) if kind == "all" else [kind]
+    result: dict[str, list[str]] = {}
+    for current_kind in kinds:
+        endpoint, params = endpoints[current_kind]
+        try:
+            payload = await risingstones_account_request(
+                credentials, "GET", endpoint, params=params
+            )
+        except RuntimeError:
+            if kind != "all":
+                raise
+            continue
+        lines = risingstones_stat_lines(current_kind, payload.get("data"))
+        if lines:
+            result[current_kind] = lines
+    return result
+
+
+def format_risingstones_statistics(statistics: dict[str, list[str]]) -> str:
+    lines = ["【石之家统计】"]
+    for kind, values in statistics.items():
+        lines.append(f"\n[{RISINGSTONES_STAT_LABELS[kind]}]")
+        lines.extend(values)
+    return "\n".join(lines)
+
+
+def parse_risingstones_glamour_query(value: str) -> RisingstonesGlamourQuery:
+    parts = value.split()
+    mode = "list"
+    if parts and parts[0] in {"详情", "detail"}:
+        mode = "detail"
+        parts = parts[1:]
+    elif parts and parts[0] in {"装备", "equipment"}:
+        mode = "equipment"
+        parts = parts[1:]
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if mode != "detail" and parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    return RisingstonesGlamourQuery(
+        mode=mode, value=" ".join(parts).strip() or None, limit=limit
+    )
+
+
+def risingstones_glamour_url(glamour_id: object) -> str:
+    return f"{RISINGSTONES_WEB_BASE}#/glamour/detail/{quote(str(glamour_id or ''))}"
+
+
+async def risingstones_glamour_detail(
+    credentials: RisingstonesCredentials, row: dict
+) -> dict:
+    glamour_id = str(row.get("id") or "").strip()
+    if not glamour_id.isdigit():
+        return row
+    try:
+        payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/home/glamour/glamourDetail",
+            params={"id": glamour_id},
+        )
+    except RuntimeError:
+        return row
+    data = payload.get("data")
+    return data if isinstance(data, dict) else row
+
+
+async def enrich_risingstones_glamour_rows(
+    credentials: RisingstonesCredentials, rows: list[dict]
+) -> list[dict]:
+    """Fetch enough detail for each result's main image and equipment list."""
+    semaphore = asyncio.Semaphore(4)
+
+    async def fetch_detail(row: dict) -> dict:
+        async with semaphore:
+            return await risingstones_glamour_detail(credentials, row)
+
+    return list(await asyncio.gather(*(fetch_detail(row) for row in rows)))
+
+
+async def risingstones_glamour_rows(
+    credentials: RisingstonesCredentials, query: RisingstonesGlamourQuery
+) -> list[dict]:
+    if query.mode == "detail":
+        if not query.value or not query.value.isdigit():
+            raise ValueError("幻化详情需要数字 ID")
+        payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/home/glamour/glamourDetail",
+            params={"id": query.value},
+        )
+        data = payload.get("data")
+        return [data] if isinstance(data, dict) else []
+
+    if query.mode == "equipment":
+        if not query.value:
+            raise ValueError("装备检索需要装备名称")
+        equipment_payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/home/gameData/searchEquip",
+            params={"page": "1", "limit": "10", "name": query.value},
+        )
+        equipment_data = equipment_payload.get("data")
+        equipment_rows = (
+            equipment_data.get("rows")
+            if isinstance(equipment_data, dict)
+            else equipment_data
+        )
+        equipment_id = next(
+            (
+                str(item.get("id") or item.get("equipment_id"))
+                for item in equipment_rows or []
+                if isinstance(item, dict)
+                and (item.get("id") or item.get("equipment_id"))
+            ),
+            None,
+        )
+        if not equipment_id:
+            return []
+        payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/common/search",
+            params={
+                "type": "7",
+                "keywords": equipment_id,
+                "searchByEquipment": "1",
+                "page": "1",
+                "limit": str(query.limit),
+            },
+        )
+    elif query.value:
+        payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/common/search",
+            params={
+                "type": "7",
+                "keywords": query.value,
+                "page": "1",
+                "limit": str(query.limit),
+            },
+        )
+    else:
+        payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/home/glamour/glamoursList",
+            params={"page": "1", "limit": str(query.limit)},
+        )
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    result = (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+    return await enrich_risingstones_glamour_rows(credentials, result)
+
+
+RISINGSTONES_EQUIPMENT_SLOT_LABELS = {
+    "MAIN_HAND": "主手",
+    "OFF_HAND": "副手",
+    "HEAD": "头部",
+    "BODY": "上衣",
+    "GLOVES": "手部",
+    "LEGS": "腿部",
+    "FEET": "脚部",
+    "EARRINGS": "耳坠",
+    "NECKLACE": "项链",
+    "BRACELETS": "手镯",
+    "LEFT_RING": "左戒指",
+    "RIGHT_RING": "右戒指",
+}
+
+
+def risingstones_glamour_main_image(row: dict) -> str | None:
+    """Return the detail page's main image, falling back to its image list."""
+    main_image = str(row.get("main_image") or "").strip()
+    if main_image.startswith(("http://", "https://")):
+        return main_image
+
+    images = row.get("images")
+    if isinstance(images, str):
+        try:
+            images = json.loads(images)
+        except json.JSONDecodeError:
+            images = []
+    if isinstance(images, list):
+        for image in images:
+            image_url = str(image or "").strip()
+            if image_url.startswith(("http://", "https://")):
+                return image_url
+    return None
+
+
+def risingstones_glamour_equipment_lines(row: dict) -> list[str]:
+    equipments = row.get("equipments")
+    if not isinstance(equipments, list):
+        return []
+
+    lines = []
+    for equipment in equipments:
+        if not isinstance(equipment, dict):
+            continue
+        name = str(equipment.get("name") or "").strip()
+        if not name:
+            continue
+        slot = str(equipment.get("slot") or "").strip()
+        label = RISINGSTONES_EQUIPMENT_SLOT_LABELS.get(slot, slot or "装备")
+        dyes = equipment.get("dyes")
+        dye_names = (
+            [
+                str(dye.get("name") or "").strip()
+                for dye in dyes
+                if isinstance(dye, dict) and str(dye.get("name") or "").strip()
+            ]
+            if isinstance(dyes, list)
+            else []
+        )
+        dye_text = f"（{' / '.join(dye_names)}）" if dye_names else ""
+        lines.append(f"{label}：{name}{dye_text}")
+    return lines
+
+
+def format_risingstones_glamour_message(
+    query: RisingstonesGlamourQuery, row: dict, index: int, total: int
+) -> RisingstonesGlamourMessage:
+    labels = {"list": "投稿", "equipment": "装备检索", "detail": "投稿详情"}
+    title = str(row.get("title") or "未命名幻化").strip()
+    author = str(
+        row.get("character_name")
+        or (row.get("userInfo") or {}).get("character_name")
+        or row.get("nickname")
+        or "未知投稿者"
+    ).strip()
+    server = "@".join(
+        part
+        for part in (
+            str(
+                row.get("area_name")
+                or (row.get("userInfo") or {}).get("area_name")
+                or ""
+            ).strip(),
+            str(
+                row.get("group_name")
+                or (row.get("userInfo") or {}).get("group_name")
+                or ""
+            ).strip(),
+        )
+        if part
+    )
+    description = strip_html(str(row.get("desc") or row.get("description") or ""))
+    metrics = []
+    for label, field in (("点赞", "likes"), ("收藏", "favorites")):
+        number = risingstones_number(row.get(field))
+        if number is not None:
+            metrics.append(f"{label}：{number}")
+    equipment_lines = risingstones_glamour_equipment_lines(row)
+    lines = [
+        f"【石之家幻化】{labels[query.mode]} {index}/{total}",
+        title,
+        f"{author}{f' @ {server}' if server else ''}",
+    ]
+    if description:
+        lines.append(description[:500])
+    if equipment_lines:
+        lines.extend(["装备：", *equipment_lines])
+    if metrics:
+        lines.append(" | ".join(metrics))
+    lines.append(risingstones_glamour_url(row.get("id")))
+    return RisingstonesGlamourMessage(
+        text="\n".join(lines), image_url=risingstones_glamour_main_image(row)
+    )
+
+
+def format_risingstones_glamour(
+    query: RisingstonesGlamourQuery, rows: list[dict]
+) -> str:
+    labels = {"list": "投稿", "equipment": "装备检索", "detail": "投稿详情"}
+    lines = [f"【石之家幻化】{labels[query.mode]} 数量：{len(rows)}"]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        title = str(row.get("title") or "未命名幻化").strip()
+        author = str(
+            row.get("character_name")
+            or (row.get("userInfo") or {}).get("character_name")
+            or row.get("nickname")
+            or "未知投稿者"
+        ).strip()
+        server = "@".join(
+            part
+            for part in (
+                str(
+                    row.get("area_name")
+                    or (row.get("userInfo") or {}).get("area_name")
+                    or ""
+                ).strip(),
+                str(
+                    row.get("group_name")
+                    or (row.get("userInfo") or {}).get("group_name")
+                    or ""
+                ).strip(),
+            )
+            if part
+        )
+        description = strip_html(str(row.get("desc") or row.get("description") or ""))
+        metrics = []
+        for label, field in (("点赞", "likes"), ("收藏", "favorites")):
+            number = risingstones_number(row.get(field))
+            if number is not None:
+                metrics.append(f"{label}：{number}")
+        lines.extend(
+            [
+                f"\n{index:02d}. {title}",
+                f"{author}{f' @ {server}' if server else ''}",
+                description[:500] if description else "暂无说明",
+                " | ".join(metrics) if metrics else "",
+                risingstones_glamour_url(row.get("id")),
+            ]
+        )
+    return "\n".join(line for line in lines if line != "")
+
+
+def parse_risingstones_guild_query(value: str) -> RisingstonesGuildQuery:
+    parts = value.split()
+    mode = "list"
+    if parts and parts[0] in {"详情", "detail"}:
+        mode = "detail"
+        parts = parts[1:]
+    limit = RISINGSTONES_DEFAULT_LIMIT
+    if mode != "detail" and parts and parts[-1].isdigit():
+        limit = max(1, min(int(parts.pop()), RISINGSTONES_MAX_LIMIT))
+    return RisingstonesGuildQuery(
+        mode=mode, value=" ".join(parts).strip() or None, limit=limit
+    )
+
+
+async def risingstones_guild_rows(
+    credentials: RisingstonesCredentials, query: RisingstonesGuildQuery
+) -> list[dict]:
+    if query.mode == "detail":
+        if not query.value or not query.value.isdigit():
+            raise ValueError("部队详情需要数字 ID")
+        payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/home/recruit/getRecruitGuildDetail",
+            params={"id": query.value},
+        )
+        data = payload.get("data")
+        return [data] if isinstance(data, dict) else []
+
+    params = {"page": "1", "limit": str(query.limit)}
+    if query.value:
+        params["guild_name"] = query.value
+    payload = await risingstones_account_request(
+        credentials, "GET", "/home/recruit/recruitGuildList", params=params
+    )
+    data = payload.get("data")
+    rows = data.get("rows") if isinstance(data, dict) else None
+    return (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+
+
+def risingstones_guild_url(guild_id: object) -> str:
+    return f"{RISINGSTONES_WEB_BASE}#/recruit/guild/detail/{quote(str(guild_id or ''))}"
+
+
+def format_risingstones_guilds(query: RisingstonesGuildQuery, rows: list[dict]) -> str:
+    label = "详情" if query.mode == "detail" else "招待"
+    lines = [f"【石之家部队{label}】数量：{len(rows)}"]
+    for index, row in enumerate(rows[: query.limit], start=1):
+        title = str(row.get("guild_name") or row.get("title") or "未命名部队").strip()
+        author = str(row.get("character_name") or "未知发布者").strip()
+        server = "@".join(
+            part
+            for part in (
+                str(row.get("area_name") or "").strip(),
+                str(row.get("group_name") or "").strip(),
+            )
+            if part
+        )
+        target_server = "@".join(
+            part
+            for part in (
+                str(row.get("target_area_name") or "").strip(),
+                str(row.get("target_group_name") or "").strip(),
+            )
+            if part
+        )
+        labels = [
+            str(item.get("name")).strip()
+            for item in row.get("labelInfo", [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+        schedule = " / ".join(
+            text
+            for text in (
+                str(row.get("weekday_time") or "").strip(),
+                str(row.get("weekend_time") or "").strip(),
+            )
+            if text
+        )
+        description = strip_html(
+            str(row.get("detail_mask") or row.get("guild_address") or "")
+        )
+        details = [
+            f"目标：{target_server}" if target_server else "",
+            f"标签：{'、'.join(labels)}" if labels else "",
+            f"活跃人数：{row['active_member_num']}"
+            if row.get("active_member_num")
+            else "",
+            schedule,
+        ]
+        lines.extend(
+            [
+                f"\n{index:02d}. {title}",
+                f"{author}{f' @ {server}' if server else ''}",
+                " | ".join(detail for detail in details if detail),
+                description[:500] if description else "暂无说明",
+                risingstones_guild_url(row.get("id")),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def format_risingstones_notifications(data: dict) -> str:
+    """Format known unread counters while retaining unknown values safely."""
+    lines = ["【石之家通知】"]
+    for label, field in RISINGSTONES_NOTIFICATION_FIELDS:
+        number = risingstones_number(data.get(field)) or 0
+        lines.append(f"{label}：{number}")
+    return "\n".join(lines)
 
 
 def normalize_party_category(value: str | None) -> str | None:
@@ -4720,13 +6038,19 @@ class TataruPlugin(Star):
         self.tarot_dict: dict | None = None
         self.cache_dir = PLUGIN_DIR / ".cache"
         self.calendar_task: asyncio.Task | None = None
+        self.risingstones_checkin_task: asyncio.Task | None = None
+        self.risingstones_accounts = RisingstonesAccountStore(RISINGSTONES_DB_PATH)
         self.last_calendar_download_time: dict[str, datetime] = {}
 
     async def initialize(self):
         debug_log("plugin.initialize", version=PLUGIN_VERSION)
         self.tarot_dict = load_tarot()
         self.cache_dir.mkdir(exist_ok=True)
+        self.risingstones_accounts.initialize()
         self.calendar_task = asyncio.create_task(self.download_calendar_loop())
+        self.risingstones_checkin_task = asyncio.create_task(
+            self.risingstones_checkin_loop()
+        )
         logger.info("Tataru AstrBot plugin initialized.")
 
     def default_calendar_server(self) -> str:
@@ -4751,6 +6075,16 @@ class TataruPlugin(Star):
 
     def ffxiv_icon_font_path(self) -> str:
         return str(self.config.get("ffxiv_icon_font_path", "") or "").strip()
+
+    def risingstones_owner_credentials(self) -> RisingstonesCredentials | None:
+        return configured_risingstones_credentials(self.config)
+
+    def risingstones_checkin_hour(self) -> int:
+        try:
+            hour = int(self.config.get("risingstones_checkin_hour", 8))
+        except (TypeError, ValueError):
+            hour = 8
+        return hour if 0 <= hour <= 23 else 8
 
     def render_text_image(
         self, text: str, output_path: Path, width_now: int = 20
@@ -4811,6 +6145,224 @@ class TataruPlugin(Star):
         image_path = self.cache_dir / "dungeon_note.jpg"
         self.render_text_image(result_text, image_path, width_now=25)
         yield event.image_result(str(image_path))
+
+    @filter.command("石之家")
+    @debug_command("石之家")
+    async def risingstones_posts(self, event: AstrMessageEvent):
+        """查询石之家公开内容和招募。"""
+        raw_query = command_args(event.message_str, "石之家")
+        private_result = await self.risingstones_private_action(event, raw_query)
+        if isinstance(private_result, RisingstonesGlamourResponse):
+            for message in private_result.messages:
+                components = []
+                if message.image_url:
+                    components.append(Comp.Image.fromURL(message.image_url))
+                components.append(Comp.Plain(message.text))
+                yield event.chain_result(components)
+            return
+        if private_result is not None:
+            yield event.plain_result(private_result)
+            return
+        if raw_query.split(maxsplit=1)[:1] == ["招募"]:
+            query = parse_risingstones_recruit_query(
+                raw_query.removeprefix("招募").strip()
+            )
+            try:
+                rows = await fetch_risingstones_recruits(query)
+            except Exception as exc:
+                logger.warning(f"石之家招募查询失败: {exc}")
+                yield event.plain_result("石之家招募查询失败，请稍后再试")
+                return
+            if not rows:
+                kind_labels = {
+                    "party": "副本",
+                    "beginner": "萌新",
+                    "other": "其他",
+                    "rp": "RP",
+                }
+                keyword_label = f"「{query.keyword}」" if query.keyword else "当前条件"
+                yield event.plain_result(
+                    f"石之家{kind_labels[query.kind]}招募中没有找到{keyword_label}的内容"
+                )
+                return
+            yield event.plain_result(format_risingstones_recruits(query, rows))
+            return
+
+        query = parse_risingstones_posts_query(raw_query)
+        try:
+            rows = await fetch_risingstones_posts(query)
+        except Exception as exc:
+            logger.warning(f"石之家内容查询失败: {exc}")
+            yield event.plain_result("石之家内容查询失败，请稍后再试")
+            return
+        if not rows:
+            kind_label = "攻略" if query.kind == "strat" else "帖子"
+            keyword_label = f"「{query.keyword}」" if query.keyword else "当前条件"
+            yield event.plain_result(
+                f"石之家{kind_label}中没有找到{keyword_label}的内容"
+            )
+            return
+        yield event.plain_result(format_risingstones_posts(query, rows))
+
+    async def risingstones_private_action(
+        self, event: AstrMessageEvent, raw_query: str
+    ) -> str | RisingstonesGlamourResponse | None:
+        """Handle private credential and check-in operations without exposing secrets."""
+        action, _, argument = raw_query.partition(" ")
+        action = action.strip()
+        argument = argument.strip()
+        personal_actions = {"绑定", "解绑", "签到", "自动签到", "我的", "通知", "统计"}
+        session_actions = {"幻化", "部队"}
+        if action not in personal_actions | session_actions:
+            return None
+        account_key = None
+        credentials = None
+        if action in personal_actions:
+            if not is_risingstones_private_event(event):
+                return "石之家本人信息、签到和自动签到仅支持私聊，并且需要先私聊完成账号绑定。"
+            account_key = risingstones_account_key(event)
+            if not account_key:
+                return "无法识别当前私聊账号，请更换平台后重试。"
+
+            if action == "绑定":
+                if not argument:
+                    return risingstones_binding_guide()
+                credentials = parse_risingstones_binding(argument)
+                if not credentials:
+                    return (
+                        "绑定信息格式不正确。请发送 `石之家 绑定` 获取 Chrome 控制台脚本，"
+                        "并在 Network 中选择“以 cURL (bash) 格式复制”后，将完整内容私聊发送给机器人。"
+                    )
+                try:
+                    profile = await risingstones_verify_credential(credentials)
+                except Exception as exc:
+                    logger.warning(f"石之家凭据验证失败: {exc}")
+                    return "石之家凭据验证失败，请重新登录石之家后执行 `石之家 绑定` 获取新的绑定信息。"
+                self.risingstones_accounts.set_credential(account_key, credentials)
+                character_name = str(profile.get("character_name") or "已绑定角色")
+                server = "@".join(
+                    part
+                    for part in (
+                        str(profile.get("area_name") or "").strip(),
+                        str(profile.get("group_name") or "").strip(),
+                    )
+                    if part
+                )
+                return f"石之家账号已绑定：{character_name}{f' @ {server}' if server else ''}"
+
+            if action == "解绑":
+                self.risingstones_accounts.remove(account_key)
+                return "石之家账号凭据和自动签到设置已移除。"
+
+            credentials = self.risingstones_accounts.get_credentials(account_key)
+            if not credentials:
+                return "尚未完成石之家账号绑定，请先在私聊发送：石之家 绑定"
+        else:
+            if is_risingstones_private_event(event):
+                account_key = risingstones_account_key(event)
+                credentials = (
+                    self.risingstones_accounts.get_credentials(account_key)
+                    if account_key
+                    else None
+                )
+            credentials = credentials or self.risingstones_owner_credentials()
+            if not credentials:
+                return (
+                    "石之家幻化和部队招待需要主人在插件设置中填写完整的 getUserInfo cURL（bash）内容，"
+                    "或在私聊中发送 `石之家 绑定` 完成绑定。"
+                )
+
+        if action == "我的":
+            try:
+                payload = await risingstones_account_request(
+                    credentials, "GET", "/home/userInfo/getUserInfo"
+                )
+            except Exception as exc:
+                logger.warning(f"石之家档案查询失败: {exc}")
+                return "石之家档案查询失败，请检查凭据是否过期后重新绑定。"
+            data = payload.get("data")
+            return (
+                format_risingstones_profile(data)
+                if isinstance(data, dict)
+                else "石之家档案为空，请稍后再试。"
+            )
+
+        if action == "通知":
+            try:
+                payload = await risingstones_account_request(
+                    credentials, "GET", "/home/sysMsg/getTip"
+                )
+            except Exception as exc:
+                logger.warning(f"石之家通知查询失败: {exc}")
+                return "石之家通知查询失败，请检查凭据是否过期后重新绑定。"
+            data = payload.get("data")
+            return (
+                format_risingstones_notifications(data)
+                if isinstance(data, dict)
+                else "石之家通知为空，请稍后再试。"
+            )
+
+        if action == "统计":
+            kind = parse_risingstones_stat_kind(argument)
+            try:
+                statistics = await risingstones_statistics(credentials, kind)
+            except Exception as exc:
+                logger.warning(f"石之家统计查询失败: {exc}")
+                return "石之家统计查询失败，请检查凭据是否过期后重新绑定。"
+            if not statistics:
+                return "当前绑定角色没有可用的石之家统计记录。"
+            return format_risingstones_statistics(statistics)
+
+        if action == "幻化":
+            query = parse_risingstones_glamour_query(argument)
+            try:
+                rows = await risingstones_glamour_rows(credentials, query)
+            except ValueError as exc:
+                return str(exc)
+            except Exception as exc:
+                logger.warning(f"石之家幻化查询失败: {exc}")
+                return "石之家幻化查询失败，请检查私聊绑定信息或插件设置页的石之家 getUserInfo cURL（bash）内容。"
+            if not rows:
+                return "没有找到符合条件的石之家幻化投稿。"
+            return RisingstonesGlamourResponse(
+                messages=[
+                    format_risingstones_glamour_message(query, row, index, len(rows))
+                    for index, row in enumerate(rows, start=1)
+                ]
+            )
+
+        if action == "部队":
+            query = parse_risingstones_guild_query(argument)
+            try:
+                rows = await risingstones_guild_rows(credentials, query)
+            except ValueError as exc:
+                return str(exc)
+            except Exception as exc:
+                logger.warning(f"石之家部队招待查询失败: {exc}")
+                return "石之家部队招待查询失败，请检查私聊绑定信息或插件设置页的石之家 cURL (bash) 配置。"
+            if not rows:
+                return "没有找到符合条件的石之家部队招待。"
+            return format_risingstones_guilds(query, rows)
+
+        if action == "自动签到":
+            enabled = argument in {"开启", "开", "on", "ON"}
+            disabled = argument in {"关闭", "关", "off", "OFF"}
+            if not enabled and not disabled:
+                return "自动签到格式：石之家 自动签到 开启 或 石之家 自动签到 关闭"
+            self.risingstones_accounts.set_auto_checkin(account_key, enabled)
+            if enabled:
+                return f"石之家自动签到已开启，将在每日 {self.risingstones_checkin_hour():02d}:00 后执行。"
+            return "石之家自动签到已关闭。"
+
+        try:
+            _, message = await risingstones_checkin(credentials)
+        except Exception as exc:
+            logger.warning(f"石之家手动签到失败: {exc}")
+            return "石之家签到失败，请检查凭据是否过期后重新绑定。"
+        day = datetime.now(RISINGSTONES_TIMEZONE).date().isoformat()
+        self.risingstones_accounts.mark_attempt(account_key, day)
+        self.risingstones_accounts.mark_checkin(account_key, day)
+        return f"石之家签到结果：{message}"
 
     @filter.command("招募")
     @debug_command("招募")
@@ -5045,6 +6597,41 @@ class TataruPlugin(Star):
                 logger.warning(f"日历更新连接错误: {exc}")
             await asyncio.sleep(60 * 60)
 
+    async def risingstones_checkin_loop(self):
+        """Run opted-in private account check-ins once per Shanghai calendar day."""
+        while True:
+            try:
+                now = datetime.now(RISINGSTONES_TIMEZONE)
+                if now.hour == self.risingstones_checkin_hour():
+                    day = now.date().isoformat()
+                    accounts = self.risingstones_accounts.due_auto_checkins(day)
+                    for account_key, credentials in accounts:
+                        self.risingstones_accounts.mark_attempt(account_key, day)
+                        try:
+                            _, message = await risingstones_checkin(credentials)
+                            self.risingstones_accounts.mark_checkin(account_key, day)
+                            debug_log(
+                                "risingstones.auto_checkin.success",
+                                account_key=account_key,
+                                message=message,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "石之家自动签到失败: %s (%s)",
+                                account_key,
+                                type(exc).__name__,
+                            )
+                            debug_log(
+                                "risingstones.auto_checkin.error",
+                                account_key=account_key,
+                                error_type=type(exc).__name__,
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"石之家自动签到任务异常: {exc}")
+            await asyncio.sleep(60)
+
     def calendar_cache_path(self, server: str) -> Path:
         return (
             self.cache_dir / f"calendar_{'global' if server == '国际服' else 'cn'}.ics"
@@ -5216,5 +6803,7 @@ class TataruPlugin(Star):
     async def terminate(self):
         if self.calendar_task:
             self.calendar_task.cancel()
+        if self.risingstones_checkin_task:
+            self.risingstones_checkin_task.cancel()
         debug_log("plugin.terminate")
         logger.info("Tataru AstrBot plugin terminated.")
