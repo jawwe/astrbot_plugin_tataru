@@ -337,21 +337,13 @@ RISINGSTONES_DB_PATH = DATA_DIR / "risingstones.sqlite3"
 RISINGSTONES_TIMEZONE = ZoneInfo("Asia/Shanghai")
 RISINGSTONES_IMPERSONATE = "chrome124"
 RISINGSTONES_BINDING_SEPARATOR = " | "
-RISINGSTONES_CONSOLE_SCRIPT = """(async () => {
-  const cookie = document.cookie
-    .split('; ')
-    .find((item) => item.startsWith('ff14risingstones='));
-  if (!cookie) {
-    throw new Error('未找到 ff14risingstones Cookie，请先在石之家完成登录。');
-  }
-  const binding = `${cookie} | ${navigator.userAgent}`;
-  if (typeof copy === 'function') {
-    copy(binding);
-  } else {
-    await navigator.clipboard.writeText(binding);
-  }
-  console.log('石之家绑定信息已复制，请在私聊发送：石之家 绑定 ' + binding);
-})()"""
+RISINGSTONES_CONSOLE_SCRIPT = """fetch(
+  'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo',
+  { credentials: 'include' },
+)
+  .then((response) => response.text())
+  .then(() => console.log('请求已发出：请在 Network 中筛选 getUserInfo，右键该请求并选择 Copy > Copy as cURL。'))
+  .catch((error) => console.error('请求触发失败：', error));"""
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
 CN_WORLD_NAME_CACHE: dict[str, dict] | None = None
@@ -2075,7 +2067,10 @@ def normalize_risingstones_cookie(value: str) -> str:
 
 
 def parse_risingstones_binding(value: str) -> RisingstonesCredentials | None:
-    """Parse console output as `ff14risingstones=... | login User-Agent`."""
+    """Parse a legacy cookie/UA pair or Chrome's copied cURL request."""
+    curl_credentials = parse_risingstones_curl_binding(value)
+    if curl_credentials:
+        return curl_credentials
     cookie_text, separator, user_agent = value.partition(RISINGSTONES_BINDING_SEPARATOR)
     cookie = normalize_risingstones_cookie(cookie_text)
     user_agent = user_agent.strip() if separator else ""
@@ -2084,10 +2079,28 @@ def parse_risingstones_binding(value: str) -> RisingstonesCredentials | None:
     return RisingstonesCredentials(cookie=cookie, user_agent=user_agent)
 
 
+def parse_risingstones_curl_binding(value: str) -> RisingstonesCredentials | None:
+    """Extract cookie and UA from Chrome DevTools' Copy as cURL output."""
+    headers = re.findall(r"(?:-H|--header)\s+['\"]([^'\"]+)['\"]", value)
+    values: dict[str, str] = {}
+    for header in headers:
+        name, separator, header_value = header.partition(":")
+        if separator:
+            values[name.strip().lower()] = header_value.strip()
+    cookie = normalize_risingstones_cookie(values.get("cookie", ""))
+    user_agent = values.get("user-agent", "").strip()
+    if not cookie or not user_agent:
+        return None
+    return RisingstonesCredentials(cookie=cookie, user_agent=user_agent)
+
+
 def risingstones_binding_guide() -> str:
     return (
-        "请在 Chrome 登录石之家后打开开发者工具 Console，粘贴并运行下方脚本。\n"
-        "脚本会复制绑定信息；随后在私聊发送：石之家 绑定 <复制结果>\n\n"
+        "石之家 Cookie 不允许网页脚本直接读取，因此请按以下步骤获取登录信息：\n"
+        "1. 保持石之家网页登录，按 F12 打开开发者工具并切到 Console。\n"
+        "2. 粘贴并运行下方脚本，再切到 Network。\n"
+        "3. 筛选 `getUserInfo`，右键该请求，选择 Copy > Copy as cURL。\n"
+        "4. 将完整 cURL 内容私聊发送：石之家 绑定 <完整 cURL>\n\n"
         "```javascript\n"
         f"{RISINGSTONES_CONSOLE_SCRIPT}\n"
         "```\n"

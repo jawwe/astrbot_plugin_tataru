@@ -198,6 +198,10 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
         )
         == credentials
     )
+    curl_binding = """curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' \\
+  -H 'cookie: other=value; ff14risingstones=abc; trailing=value' \\
+  -H 'user-agent: Mozilla/5.0 Test'"""
+    assert plugin_module.parse_risingstones_curl_binding(curl_binding) == credentials
     assert plugin_module.parse_risingstones_binding("ff14risingstones=abc") is None
     assert (
         plugin_module.configured_risingstones_credentials(
@@ -210,8 +214,8 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
     )
     assert plugin_module.configured_risingstones_credentials(None) is None
     guide = plugin_module.risingstones_binding_guide()
-    assert "ff14risingstones" in guide
-    assert "navigator.userAgent" in guide
+    assert "getUserInfo" in guide
+    assert "Copy as cURL" in guide
 
 
 def test_risingstones_personal_actions_never_use_owner_cookie(

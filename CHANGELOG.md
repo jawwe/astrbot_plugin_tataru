@@ -1,5 +1,11 @@
 # 更新日志
 
+## v1.0.21
+
+### 修复
+
+- 修复石之家 Cookie 无法由网页 Console 脚本读取的问题；绑定流程改为触发登录态请求并接受 Chrome DevTools 的完整 cURL，自动解析 Cookie 和登录 User-Agent。
+
 ## v1.0.20
 
 ### 新增
