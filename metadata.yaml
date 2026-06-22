@@ -1,7 +1,7 @@
 name: astrbot_plugin_tataru
 display_name: 塔塔露
 desc: FF14 塔塔露 AstrBot 插件，提供帮助、暖暖、选门、仙人彩、日历、攻略、石之家、招募、看看微博、物品、价格、房子、输出、角色logs、抽卡等功能。
-version: v1.0.21
+version: v1.0.22
 author: jawwe / Codex / aaron-li
 repo: https://github.com/jawwe/astrbot_plugin_tataru
 support_platforms:

@@ -202,6 +202,14 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
   -H 'cookie: other=value; ff14risingstones=abc; trailing=value' \\
   -H 'user-agent: Mozilla/5.0 Test'"""
     assert plugin_module.parse_risingstones_curl_binding(curl_binding) == credentials
+    windows_curl_binding = r'''curl ^"https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo^" ^
+  -b ^"other=value; ff14risingstones=abc^%^3Avalue; trailing=value^" ^
+  -H ^"user-agent: Mozilla/5.0 Test^"'''
+    assert plugin_module.parse_risingstones_curl_binding(windows_curl_binding) == (
+        plugin_module.RisingstonesCredentials(
+            cookie="ff14risingstones=abc%3Avalue", user_agent="Mozilla/5.0 Test"
+        )
+    )
     assert plugin_module.parse_risingstones_binding("ff14risingstones=abc") is None
     assert (
         plugin_module.configured_risingstones_credentials(

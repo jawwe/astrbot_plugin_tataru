@@ -2081,13 +2081,21 @@ def parse_risingstones_binding(value: str) -> RisingstonesCredentials | None:
 
 def parse_risingstones_curl_binding(value: str) -> RisingstonesCredentials | None:
     """Extract cookie and UA from Chrome DevTools' Copy as cURL output."""
-    headers = re.findall(r"(?:-H|--header)\s+['\"]([^'\"]+)['\"]", value)
+    # Chrome's Windows command format escapes shell-sensitive characters with
+    # carets and puts the Cookie in `-b` instead of a request header.
+    normalized = re.sub(r"\^([\"%&])", r"\1", value)
+    headers = re.findall(r"(?:-H|--header)\s+['\"]([^'\"]+)['\"]", normalized)
     values: dict[str, str] = {}
     for header in headers:
         name, separator, header_value = header.partition(":")
         if separator:
             values[name.strip().lower()] = header_value.strip()
-    cookie = normalize_risingstones_cookie(values.get("cookie", ""))
+    cookie_match = re.search(r"(?:-b|--cookie)\s+['\"]([^'\"]+)['\"]", normalized)
+    cookie_value = values.get("cookie", "")
+    if cookie_match:
+        cookie_value = cookie_match.group(1)
+    cookie_value = cookie_value.replace("^", "")
+    cookie = normalize_risingstones_cookie(cookie_value)
     user_agent = values.get("user-agent", "").strip()
     if not cookie or not user_agent:
         return None
