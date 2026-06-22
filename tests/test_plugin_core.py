@@ -60,6 +60,10 @@ def test_sensitive_debug_values_are_masked(plugin_module) -> None:
     assert plugin_module.sanitize_debug_url(
         "https://example.test/?token=abcdef"
     ).endswith("token=ab**ef")
+    assert (
+        plugin_module.sanitize_debug_value("curl sensitive-value", "curl")
+        == "cu****************ue"
+    )
 
 
 def test_proxy_settings_require_complete_authentication(plugin_module) -> None:
@@ -214,8 +218,11 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
     assert (
         plugin_module.configured_risingstones_credentials(
             {
-                "risingstones_cookie": "other=value; ff14risingstones=abc",
-                "risingstones_user_agent": "Mozilla/5.0 Test",
+                "risingstones_owner_curl": (
+                    "curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' "
+                    "-b 'other=value; ff14risingstones=abc' "
+                    "-H 'user-agent: Mozilla/5.0 Test'"
+                ),
             }
         )
         == credentials
@@ -237,8 +244,10 @@ def test_risingstones_personal_actions_never_use_owner_cookie(
 
     plugin = object.__new__(plugin_module.TataruPlugin)
     plugin.config = {
-        "risingstones_cookie": "ff14risingstones=owner",
-        "risingstones_user_agent": "Mozilla/5.0 Test",
+        "risingstones_owner_curl": (
+            "curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' "
+            "-b 'ff14risingstones=owner' -H 'user-agent: Mozilla/5.0 Test'"
+        ),
     }
 
     async def no_glamour_rows(*_args, **_kwargs) -> list[dict]:
@@ -279,6 +288,42 @@ def test_risingstones_private_response_formatting(plugin_module) -> None:
     assert "系统消息：2" in notifications
     assert "评论：1" in notifications
     assert "新粉丝：3" in notifications
+
+
+def test_risingstones_glamour_action_returns_individual_messages(
+    plugin_module, monkeypatch
+) -> None:
+    """Each glamour result should carry its own image and formatted equipment text."""
+
+    class GroupEvent:
+        def is_private_chat(self) -> bool:
+            return False
+
+    plugin = object.__new__(plugin_module.TataruPlugin)
+    plugin.config = {
+        "risingstones_owner_curl": (
+            "curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' "
+            "-b 'ff14risingstones=owner' -H 'user-agent: Mozilla/5.0 Test'"
+        ),
+    }
+
+    async def glamour_rows(*_args, **_kwargs) -> list[dict]:
+        return [
+            {
+                "id": 265250,
+                "title": "夏日白衣",
+                "main_image": "https://example.com/glamour.jpg",
+                "equipments": [{"slot": "BODY", "name": "夏暮沙滩罩衫"}],
+            }
+        ]
+
+    monkeypatch.setattr(plugin_module, "risingstones_glamour_rows", glamour_rows)
+    response = asyncio.run(plugin.risingstones_private_action(GroupEvent(), "幻化"))
+
+    assert isinstance(response, plugin_module.RisingstonesGlamourResponse)
+    assert len(response.messages) == 1
+    assert response.messages[0].image_url == "https://example.com/glamour.jpg"
+    assert "上衣：夏暮沙滩罩衫" in response.messages[0].text
 
 
 def test_risingstones_statistics_formatting(plugin_module) -> None:
@@ -322,6 +367,27 @@ def test_risingstones_glamour_query_and_formatting(plugin_module) -> None:
     assert "【石之家幻化】装备检索 数量：1" in text
     assert "点赞：12 | 收藏：3" in text
     assert "#/glamour/detail/265250" in text
+
+    message = plugin_module.format_risingstones_glamour_message(
+        query,
+        {
+            "id": 265250,
+            "title": "夏日白衣",
+            "character_name": "塔塔露",
+            "main_image": "https://example.com/glamour.jpg",
+            "equipments": [
+                {
+                    "slot": "BODY",
+                    "name": "夏暮沙滩罩衫",
+                    "dyes": [{"name": "柔彩粉染剂"}, {"name": "煤烟黑染剂"}],
+                }
+            ],
+        },
+        1,
+        1,
+    )
+    assert message.image_url == "https://example.com/glamour.jpg"
+    assert "装备：\n上衣：夏暮沙滩罩衫（柔彩粉染剂 / 煤烟黑染剂）" in message.text
 
 
 def test_risingstones_guild_query_and_formatting(plugin_module) -> None:

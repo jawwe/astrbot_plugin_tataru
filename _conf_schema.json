@@ -83,16 +83,10 @@
     "default": 8,
     "hint": "仅对已在私聊中绑定账号且手动开启自动签到的用户生效，使用 Asia/Shanghai 时区。范围为 0 到 23。"
   },
-  "risingstones_cookie": {
-    "description": "石之家主人 Cookie",
-    "type": "string",
+  "risingstones_owner_curl": {
+    "description": "石之家主人 getUserInfo cURL（bash）",
+    "type": "text",
     "default": "",
-    "hint": "可选。仅填写 ff14risingstones=...；须与下方登录 User-Agent 成对填写。私聊发送“石之家 绑定”可获取 Chrome 控制台提取脚本。不要公开分享；插件日志不会输出该值。"
-  },
-  "risingstones_user_agent": {
-    "description": "石之家主人登录 User-Agent",
-    "type": "string",
-    "default": "",
-    "hint": "可选。填写登录石之家时浏览器的完整 User-Agent，必须与石之家主人 Cookie 来自同一次登录。私聊发送“石之家 绑定”可获取提取脚本。"
+    "hint": "可选。登录石之家后在开发者工具 Network 中筛选 getUserInfo，右键选择“以 cURL (bash) 格式复制”，将完整内容粘贴到此处。用于幻化和部队招待查询；不要填写 cmd、PowerShell、fetch 或 Node.js 格式，也不要公开分享。"
   }
 }

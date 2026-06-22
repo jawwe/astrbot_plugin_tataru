@@ -79,6 +79,7 @@ SENSITIVE_DEBUG_KEYWORDS = (
     "secret",
     "password",
     "credential",
+    "curl",
     "api_key",
     "apikey",
     "proxy_auth",
@@ -683,6 +684,17 @@ class RisingstonesGuildQuery:
 class RisingstonesCredentials:
     cookie: str
     user_agent: str
+
+
+@dataclass(frozen=True)
+class RisingstonesGlamourMessage:
+    text: str
+    image_url: str | None
+
+
+@dataclass(frozen=True)
+class RisingstonesGlamourResponse:
+    messages: list[RisingstonesGlamourMessage]
 
 
 class RisingstonesAccountStore:
@@ -2119,8 +2131,16 @@ def risingstones_binding_guide() -> str:
 def configured_risingstones_credentials(
     config: dict | None,
 ) -> RisingstonesCredentials | None:
-    """Read operator credentials only when both cookie and login UA are present."""
+    """Read operator credentials from the full Chrome cURL configuration."""
     config = config or {}
+    curl_value = str(config.get("risingstones_owner_curl", "") or "").strip()
+    if curl_value:
+        if "getUserInfo" not in curl_value:
+            return None
+        return parse_risingstones_curl_binding(curl_value)
+
+    # Keep legacy paired values functional for existing installations. New
+    # configuration uses `risingstones_owner_curl` exclusively.
     cookie = normalize_risingstones_cookie(
         str(config.get("risingstones_cookie", "") or "")
     )
@@ -2482,6 +2502,38 @@ def risingstones_glamour_url(glamour_id: object) -> str:
     return f"{RISINGSTONES_WEB_BASE}#/glamour/detail/{quote(str(glamour_id or ''))}"
 
 
+async def risingstones_glamour_detail(
+    credentials: RisingstonesCredentials, row: dict
+) -> dict:
+    glamour_id = str(row.get("id") or "").strip()
+    if not glamour_id.isdigit():
+        return row
+    try:
+        payload = await risingstones_account_request(
+            credentials,
+            "GET",
+            "/home/glamour/glamourDetail",
+            params={"id": glamour_id},
+        )
+    except RuntimeError:
+        return row
+    data = payload.get("data")
+    return data if isinstance(data, dict) else row
+
+
+async def enrich_risingstones_glamour_rows(
+    credentials: RisingstonesCredentials, rows: list[dict]
+) -> list[dict]:
+    """Fetch enough detail for each result's main image and equipment list."""
+    semaphore = asyncio.Semaphore(4)
+
+    async def fetch_detail(row: dict) -> dict:
+        async with semaphore:
+            return await risingstones_glamour_detail(credentials, row)
+
+    return list(await asyncio.gather(*(fetch_detail(row) for row in rows)))
+
+
 async def risingstones_glamour_rows(
     credentials: RisingstonesCredentials, query: RisingstonesGlamourQuery
 ) -> list[dict]:
@@ -2556,8 +2608,125 @@ async def risingstones_glamour_rows(
         )
     data = payload.get("data")
     rows = data.get("rows") if isinstance(data, dict) else None
-    return (
+    result = (
         [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
+    return await enrich_risingstones_glamour_rows(credentials, result)
+
+
+RISINGSTONES_EQUIPMENT_SLOT_LABELS = {
+    "MAIN_HAND": "主手",
+    "OFF_HAND": "副手",
+    "HEAD": "头部",
+    "BODY": "上衣",
+    "GLOVES": "手部",
+    "LEGS": "腿部",
+    "FEET": "脚部",
+    "EARRINGS": "耳坠",
+    "NECKLACE": "项链",
+    "BRACELETS": "手镯",
+    "LEFT_RING": "左戒指",
+    "RIGHT_RING": "右戒指",
+}
+
+
+def risingstones_glamour_main_image(row: dict) -> str | None:
+    """Return the detail page's main image, falling back to its image list."""
+    main_image = str(row.get("main_image") or "").strip()
+    if main_image.startswith(("http://", "https://")):
+        return main_image
+
+    images = row.get("images")
+    if isinstance(images, str):
+        try:
+            images = json.loads(images)
+        except json.JSONDecodeError:
+            images = []
+    if isinstance(images, list):
+        for image in images:
+            image_url = str(image or "").strip()
+            if image_url.startswith(("http://", "https://")):
+                return image_url
+    return None
+
+
+def risingstones_glamour_equipment_lines(row: dict) -> list[str]:
+    equipments = row.get("equipments")
+    if not isinstance(equipments, list):
+        return []
+
+    lines = []
+    for equipment in equipments:
+        if not isinstance(equipment, dict):
+            continue
+        name = str(equipment.get("name") or "").strip()
+        if not name:
+            continue
+        slot = str(equipment.get("slot") or "").strip()
+        label = RISINGSTONES_EQUIPMENT_SLOT_LABELS.get(slot, slot or "装备")
+        dyes = equipment.get("dyes")
+        dye_names = (
+            [
+                str(dye.get("name") or "").strip()
+                for dye in dyes
+                if isinstance(dye, dict) and str(dye.get("name") or "").strip()
+            ]
+            if isinstance(dyes, list)
+            else []
+        )
+        dye_text = f"（{' / '.join(dye_names)}）" if dye_names else ""
+        lines.append(f"{label}：{name}{dye_text}")
+    return lines
+
+
+def format_risingstones_glamour_message(
+    query: RisingstonesGlamourQuery, row: dict, index: int, total: int
+) -> RisingstonesGlamourMessage:
+    labels = {"list": "投稿", "equipment": "装备检索", "detail": "投稿详情"}
+    title = str(row.get("title") or "未命名幻化").strip()
+    author = str(
+        row.get("character_name")
+        or (row.get("userInfo") or {}).get("character_name")
+        or row.get("nickname")
+        or "未知投稿者"
+    ).strip()
+    server = "@".join(
+        part
+        for part in (
+            str(
+                row.get("area_name")
+                or (row.get("userInfo") or {}).get("area_name")
+                or ""
+            ).strip(),
+            str(
+                row.get("group_name")
+                or (row.get("userInfo") or {}).get("group_name")
+                or ""
+            ).strip(),
+        )
+        if part
+    )
+    description = strip_html(str(row.get("desc") or row.get("description") or ""))
+    metrics = []
+    for label, field in (("点赞", "likes"), ("收藏", "favorites")):
+        number = risingstones_number(row.get(field))
+        if number is not None:
+            metrics.append(f"{label}：{number}")
+    equipment_lines = risingstones_glamour_equipment_lines(row)
+    lines = [
+        f"【石之家幻化】{labels[query.mode]} {index}/{total}",
+        title,
+        f"{author}{f' @ {server}' if server else ''}",
+    ]
+    if description:
+        lines.append(description[:500])
+    if equipment_lines:
+        lines.extend(["装备：", *equipment_lines])
+    if metrics:
+        lines.append(" | ".join(metrics))
+    lines.append(risingstones_glamour_url(row.get("id")))
+    return RisingstonesGlamourMessage(
+        text="\n".join(lines), image_url=risingstones_glamour_main_image(row)
     )
 
 
@@ -5981,6 +6150,14 @@ class TataruPlugin(Star):
         """查询石之家公开内容和招募。"""
         raw_query = command_args(event.message_str, "石之家")
         private_result = await self.risingstones_private_action(event, raw_query)
+        if isinstance(private_result, RisingstonesGlamourResponse):
+            for message in private_result.messages:
+                components = []
+                if message.image_url:
+                    components.append(Comp.Image.fromURL(message.image_url))
+                components.append(Comp.Plain(message.text))
+                yield event.chain_result(components)
+            return
         if private_result is not None:
             yield event.plain_result(private_result)
             return
@@ -6027,7 +6204,7 @@ class TataruPlugin(Star):
 
     async def risingstones_private_action(
         self, event: AstrMessageEvent, raw_query: str
-    ) -> str | None:
+    ) -> str | RisingstonesGlamourResponse | None:
         """Handle private credential and check-in operations without exposing secrets."""
         action, _, argument = raw_query.partition(" ")
         action = action.strip()
@@ -6089,7 +6266,7 @@ class TataruPlugin(Star):
             credentials = credentials or self.risingstones_owner_credentials()
             if not credentials:
                 return (
-                    "石之家幻化和部队招待需要主人在插件设置中同时填写石之家 Cookie 和登录 User-Agent，"
+                    "石之家幻化和部队招待需要主人在插件设置中填写完整的 getUserInfo cURL（bash）内容，"
                     "或在私聊中发送 `石之家 绑定` 完成绑定。"
                 )
 
@@ -6142,10 +6319,15 @@ class TataruPlugin(Star):
                 return str(exc)
             except Exception as exc:
                 logger.warning(f"石之家幻化查询失败: {exc}")
-                return "石之家幻化查询失败，请检查私聊绑定信息或插件设置页的石之家 Cookie 和登录 User-Agent。"
+                return "石之家幻化查询失败，请检查私聊绑定信息或插件设置页的石之家 getUserInfo cURL（bash）内容。"
             if not rows:
                 return "没有找到符合条件的石之家幻化投稿。"
-            return format_risingstones_glamour(query, rows)
+            return RisingstonesGlamourResponse(
+                messages=[
+                    format_risingstones_glamour_message(query, row, index, len(rows))
+                    for index, row in enumerate(rows, start=1)
+                ]
+            )
 
         if action == "部队":
             query = parse_risingstones_guild_query(argument)
