@@ -1,10 +1,10 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.28-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.29-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
-面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
+面向 Final Fantasy XIV 国服与国际服玩家的 AstrBot 查询插件。通过聊天指令提供活动日历、副本攻略、石之家、招募、物品与市场、房屋、微博和 FFLogs 等信息，并附带独立的管理页面。
 
 ## 功能特性
 
@@ -18,7 +18,7 @@
 | `仙人彩` | 随机给出 3 组仙人彩号码 | 文本 |
 | `日历` | 查询国服 / 国际服活动日历 | 文本 |
 | `攻略` | 查询副本攻略 | 图片 / 文本 |
-| `石之家` | 查询石之家公开帖子和攻略 | 文本 |
+| `石之家` | 查询社区内容、招募、账号信息、签到、幻化和部队招待 | 文本 / 图片 |
 | `招募` | 查询 FF14 国服招募板 | 图片 |
 | `看看微博` | 查询 FF14 官方微博最新消息 | 文本 |
 | `物品` | 查询物品基础信息和获取方式 | 图标 + 图片 |
@@ -38,6 +38,7 @@
 | 价格 | 支持四大区、具体服务器、HQ 和返回数量筛选 |
 | 房屋 | 支持服务器、房区、房型、房号和返回数量筛选 |
 | FFLogs | 支持国服 / 国际服、rDPS / aDPS / pDPS / nDPS / cDPS、角色公开战绩查询 |
+| 石之家 | 支持公开帖子、攻略与招募；私聊绑定后可查询个人信息、通知、统计、签到、幻化和部队招待 |
 | 图片输出 | 文本转图片默认使用系统字体，也可在配置页指定字体路径 |
 
 ## 安装方法
@@ -94,7 +95,7 @@ https://github.com/jawwe/astrbot_plugin_tataru
 攻略 副本名 文本
 ```
 
-### 石之家
+### 石之家公开查询
 
 ```text
 石之家
@@ -106,13 +107,9 @@ https://github.com/jawwe/astrbot_plugin_tataru
 石之家 招募 RP 5
 ```
 
-默认查询最新帖子。可指定 `帖子` 或 `攻略`，再附加关键词和数量；默认 `10` 条，最多 `20` 条。
+无需绑定即可查询最新帖子、攻略和公开招募。`帖子` / `攻略` 可附加关键词与数量，默认返回 `10` 条，最多 `20` 条；公开招募支持 `副本`、`萌新`、`其他` 和 `RP` 分类。
 
-在 `石之家 招募` 下，可查询公开的 `副本`、`萌新`、`其他` 和 `RP` 招募；部队招待需要登录态，会在石之家账号绑定功能中提供。
-
-### 石之家账号与签到
-
-`我的`、`通知`、`统计`、签到和自动签到仅能在私聊中使用，并且必须由对应用户私聊绑定石之家登录信息。凭据按平台和用户独立保存到插件本地 SQLite 数据库，不会在消息或日志中回显。
+### 石之家账号功能
 
 ```text
 石之家 绑定
@@ -134,17 +131,10 @@ https://github.com/jawwe/astrbot_plugin_tataru
 石之家 解绑
 ```
 
-在私聊发送 `石之家 绑定` 后，机器人会返回 Chrome Console 脚本。石之家会话 Cookie 不允许网页脚本直接读取，因此脚本仅触发一条已登录的资料请求。随后在 Chrome 开发者工具 Network 中筛选 `getUserInfo`，右键该请求并明确选择 `Copy > Copy as cURL (bash)`（中文界面为“以 cURL (bash) 格式复制”），将完整 cURL 原样私聊发送给机器人即可完成绑定；插件会自动提取 Cookie 和登录 User-Agent。不要选择 cmd、PowerShell、fetch 或 Node.js 格式。若 Chrome 首次阻止粘贴，请先在 Console 输入 `allow pasting`。
-
-绑定会先验证账号是否已绑定角色。旧版只保存 Cookie 的绑定无法继续使用，需要按上面的流程重新绑定。自动签到默认关闭；开启后，插件会在 `Asia/Shanghai` 时区的配置时点执行，每个账号每天最多尝试一次。
-
-`石之家 我的` 返回当前绑定角色档案；`石之家 通知` 返回系统、评论、招募和粉丝等未读计数。
-
-`石之家 统计` 默认汇总当前角色有记录的战场、绝境、钓鱼、零式、幻化、蜃景幻界和深层迷宫数据。可指定 `战场`、`绝境`、`钓鱼`、`零式`、`幻化`、`蜃景` 或 `深层` 查询单项。
-
-`石之家 幻化` 查询投稿列表或按标题检索；使用 `装备` 可按装备名称检索相关投稿，使用 `详情` 加投稿 ID 可查看单条投稿。每条结果会单独发送首图、投稿信息和装备/染色清单。它优先使用私聊绑定信息；未绑定时可使用插件设置页配置的主人 `getUserInfo` cURL（bash）。
-
-`石之家 部队` 查询登录态可见的部队招待，支持按部队名称检索和按 ID 查看详情。它优先使用私聊绑定信息；未绑定时可使用插件设置页配置的主人 `getUserInfo` cURL（bash）。
+- `我的`、`通知`、`统计`、签到和自动签到仅限私聊，且必须由该用户完成绑定。凭据按平台与用户独立保存在本地 SQLite，不会回显到消息或日志。
+- 私聊发送 `石之家 绑定`，按机器人提示在 Chrome 开发者工具 Network 中找到 `getUserInfo` 请求，选择 **Copy > Copy as cURL (bash)**，再将完整内容私聊发送给机器人。不要使用 cmd、PowerShell、fetch 或 Node.js 格式。
+- 自动签到默认关闭；开启后会按 `Asia/Shanghai` 时区的配置时点执行，每个账号每天最多尝试一次。
+- `幻化` 与 `部队` 优先使用私聊绑定凭据；未绑定时可使用管理页面中主人配置的 `getUserInfo` cURL（bash）查询公开可见的登录态内容。个人信息、通知、统计和签到不会使用主人凭据。
 
 ### 招募
 
@@ -274,9 +264,19 @@ astrbot_plugin_tataru/
 
 ## 数据源与参考项目
 
+### 运行框架与实现参考
+
 - [AstrBot](https://github.com/AstrBotDevs/AstrBot)：插件运行框架。
 - [Soulter/helloworld](https://github.com/Soulter/helloworld)：AstrBot 插件结构参考模板。
 - [TataruBot2](https://github.com/aaron-lii/TataruBot2)：原始功能来源。
+- [Sakura520222/astrbot_plugin_web_analyzer](https://github.com/Sakura520222/astrbot_plugin_web_analyzer)：README 与插件发布结构参考。
+- [jiantoucn/astrbot_plugin_weibo_monitor](https://github.com/jiantoucn/astrbot_plugin_weibo_monitor)：微博登录态请求与内容筛选参考。
+- [674537331/astrbot_plugin_fflogs](https://github.com/674537331/astrbot_plugin_fflogs)：FFLogs 配置与角色查询交互参考。
+- [LittleNightmare/opencli-plugin-ff14risingstones](https://github.com/LittleNightmare/opencli-plugin-ff14risingstones)：石之家接口与功能设计参考。
+- [StarHeartHunt/ff14risingstone_sign_task](https://github.com/StarHeartHunt/ff14risingstone_sign_task)：石之家签到会话流程参考。
+
+### 数据源
+
 - [remote-party-finder](https://github.com/LittleNightmare/remote-party-finder)：招募板 API 数据源。
 - [XIVAPI v2](https://xivapi-v2.xivcdn.com/zh-cn/)：FF14 游戏数据查询。
 - [Garland Tools 国服站](https://garlandtools.cn/)：物品详情、来源和图标数据源。
