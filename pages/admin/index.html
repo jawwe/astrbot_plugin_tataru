@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>塔塔露管理台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="塔塔露管理导航">
+        <div class="brand"><img src="../../logo.png" alt="塔塔露" /><span>塔塔露</span></div>
+        <nav class="nav-list">
+          <button class="nav-item active" data-view="overview" type="button">首页</button>
+          <button class="nav-item" data-view="features" type="button">功能开关</button>
+          <button class="nav-item" data-view="tests" type="button">功能测试</button>
+          <button class="nav-item" data-view="risingstones" type="button">石之家</button>
+          <button class="nav-item" data-view="database" type="button">数据库</button>
+          <button class="nav-item" data-view="activity" type="button">活动日志</button>
+        </nav>
+        <p class="sidebar-note">所有页面操作均通过 AstrBot 已认证的插件页面桥接执行。</p>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">PLUGIN OPERATIONS</p>
+            <h1 id="page-title">运行状况</h1>
+          </div>
+          <div class="topbar-actions">
+            <span id="version-badge" class="version-badge">v--</span>
+            <button id="refresh" class="button secondary" type="button">刷新</button>
+          </div>
+        </header>
+
+        <output id="status" class="status" aria-live="polite"></output>
+
+        <section id="overview" class="view active" aria-labelledby="page-title">
+          <div class="metric-grid">
+            <article class="metric"><span>运行时长</span><strong id="uptime">--</strong><small>当前进程</small></article>
+            <article class="metric"><span>石之家账号</span><strong id="risingstones-count">--</strong><small id="auto-checkin-count">-- 个自动签到</small></article>
+            <article class="metric"><span>本地缓存</span><strong id="cache-size">--</strong><small>可在数据库页面清理</small></article>
+            <article class="metric"><span>代理状态</span><strong id="proxy-status">--</strong><small id="proxy-detail">--</small></article>
+          </div>
+          <div class="two-column">
+            <section class="panel">
+              <div class="panel-heading"><h2>后台任务</h2><span class="subtle">实时</span></div>
+              <div id="task-list" class="status-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading"><h2>数据源状态</h2><span class="subtle">配置检测</span></div>
+              <div id="source-list" class="status-list"></div>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-heading"><h2>最近活动</h2><button class="text-button" data-goto="activity" type="button">查看全部</button></div>
+            <div id="overview-activity" class="activity-list"></div>
+          </section>
+        </section>
+
+        <section id="features" class="view" hidden>
+          <div class="view-heading"><div><h2>功能开关</h2><p>停用后对应命令会立即返回管理台停用提示，不再访问外部数据源。</p></div><button id="save-features" class="button" type="button">保存开关</button></div>
+          <div id="feature-list" class="feature-grid"></div>
+        </section>
+
+        <section id="tests" class="view" hidden>
+          <div class="view-heading"><div><h2>功能测试</h2><p>测试使用固定目标，不接收任意 URL，也不会执行签到或修改配置。</p></div></div>
+          <div class="test-grid">
+            <article class="panel test-card"><h3>代理连接</h3><p>通过当前代理访问固定 HTTPS 站点。</p><button class="button" data-test="proxy" type="button">测试代理</button><output class="test-result" data-result="proxy"></output></article>
+            <article class="panel test-card"><h3>FFLogs</h3><p>检查 FFLogs 页面访问可用性。</p><button class="button" data-test="fflogs" type="button">测试 FFLogs</button><output class="test-result" data-result="fflogs"></output></article>
+            <article class="panel test-card"><h3>公开数据源</h3><p>检查国服活动日历主地址。</p><button class="button" data-test="sources" type="button">测试数据源</button><output class="test-result" data-result="sources"></output></article>
+            <article class="panel test-card"><h3>石之家</h3><p>使用主人配置验证登录态，不显示凭据。</p><button class="button" data-test="risingstones" type="button">验证石之家</button><output class="test-result" data-result="risingstones"></output></article>
+          </div>
+        </section>
+
+        <section id="risingstones" class="view" hidden>
+          <div class="view-heading"><div><h2>石之家</h2><p>主人凭据仅用于公开查询兜底；个人信息、签到及自动签到仍必须由用户私聊绑定。</p></div></div>
+          <section class="panel form-panel">
+            <div class="panel-heading"><h3>主人 getUserInfo cURL（bash）</h3><span id="owner-curl-status" class="subtle">未加载</span></div>
+            <textarea id="owner-curl" rows="7" spellcheck="false" placeholder="从 Chrome DevTools 的 getUserInfo 请求选择“以 cURL (bash) 格式复制”后粘贴到此处。"></textarea>
+            <div class="form-actions"><button id="save-owner-curl" class="button" type="button">保存凭据</button><button class="button secondary" data-test="risingstones" type="button">验证登录态</button></div>
+          </section>
+          <section class="panel"><div class="panel-heading"><h3>已绑定用户</h3><span class="subtle">账号标识已脱敏</span></div><div class="table-wrap"><table><thead><tr><th>账号</th><th>自动签到</th><th>最近签到</th><th>最近尝试</th><th>更新时间</th></tr></thead><tbody id="risingstones-accounts"></tbody></table></div></section>
+        </section>
+
+        <section id="database" class="view" hidden>
+          <div class="view-heading"><div><h2>数据库</h2><p>仅显示汇总信息。页面不提供任意 SQL 执行或凭据字段访问。</p></div></div>
+          <div class="metric-grid compact"><article class="metric"><span>管理数据库</span><strong id="admin-db-size">--</strong><small id="admin-db-tables">--</small></article><article class="metric"><span>石之家数据库</span><strong id="risingstones-db-size">--</strong><small id="risingstones-db-summary">--</small></article><article class="metric"><span>FFLogs 跟踪</span><strong id="fflogs-tracking-count">--</strong><small>已预留，尚未启用</small></article></div>
+          <section class="panel"><div class="panel-heading"><h3>维护操作</h3><span class="subtle">操作将记录到活动日志</span></div><div class="form-actions"><button id="backup-db" class="button secondary" type="button">创建管理数据库备份</button><button id="clear-cache" class="button danger" type="button">清理图片与响应缓存</button></div><output id="database-result" class="test-result"></output></section>
+        </section>
+
+        <section id="activity" class="view" hidden>
+          <div class="view-heading"><div><h2>活动日志</h2><p>只记录管理操作和连接测试的脱敏摘要。</p></div></div>
+          <section class="panel"><div id="activity-list" class="activity-list"></div></section>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

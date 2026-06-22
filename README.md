@@ -1,7 +1,7 @@
 # AstrBot 塔塔露插件
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.24-blue.svg)](metadata.yaml)
+[![Version](https://img.shields.io/badge/version-v1.0.25-blue.svg)](metadata.yaml)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-7c3aed.svg)](https://github.com/Soulter/AstrBot)
 
 面向 Final Fantasy XIV 国服/国际服玩家的 AstrBot 插件，提供时尚品鉴、活动日历、副本攻略、石之家内容、招募板、微博资讯、物品资料、市场价格、房屋空房、FFLogs 输出分位、角色 Logs 和塔罗抽卡等查询功能。
@@ -49,6 +49,21 @@ https://github.com/jawwe/astrbot_plugin_tataru
 ```
 
 安装后在 AstrBot WebUI 重载插件即可使用。
+
+## 管理页面
+
+插件提供 AstrBot Plugin Page：`塔塔露 / admin`。管理页面仅可由 AstrBot 已认证的 WebUI 访问，所有操作通过插件页面桥接执行。
+
+| 页面 | 内容 |
+| --- | --- |
+| 首页 | 进程运行时长、后台任务、缓存、代理、数据源配置状态和最近管理活动 |
+| 功能开关 | 分组启停核心、招募板、物品与市场、FFLogs、石之家和微博功能；停用后相关命令不会再请求外部服务 |
+| 功能测试 | 代理、FFLogs、国服日历主数据源和石之家主人登录态的固定目标测试 |
+| 石之家 | 设置主人 `getUserInfo` cURL（bash）、验证登录态、查看已脱敏的私聊绑定账号状态 |
+| 数据库 | 查看 SQLite 汇总、创建管理数据库备份、清理图片与响应缓存；不提供任意 SQL 执行 |
+| 活动日志 | 查看已脱敏的管理操作和连接测试摘要 |
+
+页面中的石之家主人凭据与私聊绑定使用同一种完整 `getUserInfo` cURL（bash）格式。页面不会回显完整 cURL、Cookie、Token 或私聊账号标识；`石之家 我的`、通知、统计、签到和自动签到仍只使用用户在私聊中提供的独立凭据。
 
 ## 使用方法
 

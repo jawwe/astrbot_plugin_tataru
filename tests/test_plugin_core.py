@@ -27,7 +27,12 @@ def plugin_module(monkeypatch):
     components = types.ModuleType("astrbot.api.message_components")
     star = types.ModuleType("astrbot.api.star")
     star.Context = object
-    star.Star = object
+
+    class Star:
+        def __init__(self, _context) -> None:
+            pass
+
+    star.Star = Star
     star.register = lambda *_args, **_kwargs: lambda cls: cls
 
     monkeypatch.setitem(sys.modules, "astrbot", astrbot)
@@ -421,3 +426,126 @@ def test_risingstones_guild_query_and_formatting(plugin_module) -> None:
     assert "【石之家部队招待】数量：1" in text
     assert "标签：休闲" in text
     assert "#/recruit/guild/detail/12345" in text
+
+
+def test_admin_store_persists_feature_flags_and_masks_activity(
+    plugin_module, tmp_path
+) -> None:
+    """Admin state is persistent while activity details never retain secrets."""
+    store = plugin_module.PluginAdminStore(tmp_path / "admin.sqlite3")
+    store.initialize()
+
+    store.set_feature_flags({"fflogs": False, "risingstones": True})
+    assert store.get_feature_flags()["fflogs"] is False
+    assert store.get_feature_flags()["risingstones"] is True
+
+    store.record_activity("test", "success", "cookie=secret-value")
+    activity = store.recent_activity(limit=1)
+    assert activity[0]["source"] == "test"
+    assert activity[0]["status"] == "success"
+    assert "secret-value" not in activity[0]["detail"]
+
+
+def test_admin_feature_flags_and_overview_are_real(plugin_module, tmp_path) -> None:
+    """Overview reports runtime values and feature flags default to enabled."""
+    store = plugin_module.PluginAdminStore(tmp_path / "admin.sqlite3")
+    store.initialize()
+    store.set_feature_flags({"fflogs": False})
+
+    assert plugin_module.feature_enabled(store, "fflogs") is False
+    assert plugin_module.feature_enabled(store, "risingstones") is True
+
+    overview = plugin_module.build_admin_overview(
+        store,
+        version="1.0.25",
+        started_at=plugin_module.datetime.now(plugin_module.RISINGSTONES_TIMEZONE),
+        risingstones_accounts=3,
+        auto_checkin_accounts=2,
+    )
+    assert overview["version"] == "1.0.25"
+    assert overview["risingstones_accounts"] == 3
+    assert overview["auto_checkin_accounts"] == 2
+    assert overview["feature_flags"]["fflogs"] is False
+
+
+def test_admin_test_results_and_owner_curl_are_sanitized(plugin_module) -> None:
+    """Page test responses never expose credentials and accept only getUserInfo cURL."""
+    result = plugin_module.sanitize_admin_test_result(
+        {"cookie": "secret", "latency_ms": 12, "message": "ok"}
+    )
+    assert "cookie" not in result
+    assert result == {"latency_ms": 12, "message": "ok"}
+    assert plugin_module.validate_owner_curl_for_admin(
+        "curl 'https://apiff14risingstones.web.sdo.com/api/home/userInfo/getUserInfo' "
+        "-b 'ff14risingstones=abc' -H 'user-agent: Mozilla/5.0'"
+    )
+    assert not plugin_module.validate_owner_curl_for_admin("curl https://example.test")
+
+
+def test_admin_command_groups_and_cache_summary(plugin_module, tmp_path) -> None:
+    """The Page can control command groups and report only real cache files."""
+    cache_dir = tmp_path / ".cache"
+    cache_dir.mkdir()
+    (cache_dir / "response.jpg").write_bytes(b"1234")
+    (cache_dir / "ignored").mkdir()
+
+    assert plugin_module.admin_feature_for_command("输出") == "fflogs"
+    assert plugin_module.admin_feature_for_command("房屋") == "market"
+    assert plugin_module.admin_feature_for_command("未知指令") is None
+    assert plugin_module.plugin_cache_size(cache_dir) == 4
+
+
+def test_admin_database_summary_reserves_fflogs_tracking(
+    plugin_module, tmp_path
+) -> None:
+    """The admin database always reserves a separate FFLogs tracking table."""
+    store = plugin_module.PluginAdminStore(tmp_path / "admin.sqlite3")
+    store.initialize()
+
+    summary = store.database_summary()
+
+    assert "fflogs_tracking_accounts" in summary["tables"]
+    assert summary["row_counts"]["fflogs_tracking_accounts"] == 0
+
+
+def test_admin_page_registers_authenticated_operations_routes(plugin_module) -> None:
+    """Plugin construction registers all Page routes on the AstrBot context."""
+    routes = []
+
+    class Context:
+        def register_web_api(self, route, handler, methods, description) -> None:
+            routes.append((route, handler, methods, description))
+
+    plugin_module.TataruPlugin(Context(), {})
+
+    registered = {route for route, *_ in routes}
+    assert f"/{plugin_module.PLUGIN_NAME}/admin/overview" in registered
+    assert f"/{plugin_module.PLUGIN_NAME}/admin/features" in registered
+    assert f"/{plugin_module.PLUGIN_NAME}/admin/tests/risingstones" in registered
+    assert f"/{plugin_module.PLUGIN_NAME}/admin/database/summary" in registered
+
+
+def test_admin_overview_reports_sanitized_runtime_state(
+    plugin_module, tmp_path
+) -> None:
+    """The overview route emits operational fields without any credentials."""
+
+    class Context:
+        def register_web_api(self, *_args) -> None:
+            pass
+
+    plugin = plugin_module.TataruPlugin(Context(), {})
+    plugin.cache_dir = tmp_path / ".cache"
+    plugin.cache_dir.mkdir()
+    plugin.admin_store = plugin_module.PluginAdminStore(tmp_path / "admin.sqlite3")
+    plugin.risingstones_accounts = plugin_module.RisingstonesAccountStore(
+        tmp_path / "risingstones.sqlite3"
+    )
+    plugin.admin_store.initialize()
+    plugin.risingstones_accounts.initialize()
+
+    overview = asyncio.run(plugin.admin_overview())
+
+    assert overview["version"] == plugin_module.PLUGIN_VERSION
+    assert overview["sources"]["risingstones_owner_configured"] is False
+    assert "risingstones_owner_curl" not in overview
