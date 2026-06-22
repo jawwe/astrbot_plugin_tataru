@@ -1,5 +1,16 @@
 # 更新日志
 
+## v1.0.20
+
+### 新增
+
+- 私聊发送 `石之家 绑定` 可获取 Chrome Console 脚本，自动提取绑定所需的石之家会话 Cookie 与登录 User-Agent。
+- 新增插件设置项 `risingstones_user_agent`，可与主人 Cookie 配对用于幻化和部队招待查询。
+
+### 调整
+
+- 石之家登录态请求改为使用 Chrome 指纹，并强制将会话 Cookie 与登录 User-Agent 成对保存和使用；旧版仅 Cookie 绑定需要重新绑定。
+
 ## v1.0.19
 
 ### 新增

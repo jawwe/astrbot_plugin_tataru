@@ -17,6 +17,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import aiohttp
+from curl_cffi import requests as curl_requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 import astrbot.api.message_components as Comp
@@ -334,6 +335,23 @@ RISINGSTONES_DEFAULT_LIMIT = 10
 RISINGSTONES_MAX_LIMIT = 20
 RISINGSTONES_DB_PATH = DATA_DIR / "risingstones.sqlite3"
 RISINGSTONES_TIMEZONE = ZoneInfo("Asia/Shanghai")
+RISINGSTONES_IMPERSONATE = "chrome124"
+RISINGSTONES_BINDING_SEPARATOR = " | "
+RISINGSTONES_CONSOLE_SCRIPT = """(async () => {
+  const cookie = document.cookie
+    .split('; ')
+    .find((item) => item.startsWith('ff14risingstones='));
+  if (!cookie) {
+    throw new Error('未找到 ff14risingstones Cookie，请先在石之家完成登录。');
+  }
+  const binding = `${cookie} | ${navigator.userAgent}`;
+  if (typeof copy === 'function') {
+    copy(binding);
+  } else {
+    await navigator.clipboard.writeText(binding);
+  }
+  console.log('石之家绑定信息已复制，请在私聊发送：石之家 绑定 ' + binding);
+})()"""
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
 CN_WORLD_NAME_CACHE: dict[str, dict] | None = None
@@ -669,6 +687,12 @@ class RisingstonesGuildQuery:
     limit: int
 
 
+@dataclass(frozen=True)
+class RisingstonesCredentials:
+    cookie: str
+    user_agent: str
+
+
 class RisingstonesAccountStore:
     """Small per-user SQLite store for private Rising Stones credentials."""
 
@@ -683,6 +707,7 @@ class RisingstonesAccountStore:
                 CREATE TABLE IF NOT EXISTS risingstones_accounts (
                     account_key TEXT PRIMARY KEY,
                     credential TEXT NOT NULL,
+                    user_agent TEXT NOT NULL DEFAULT '',
                     auto_checkin INTEGER NOT NULL DEFAULT 0,
                     last_checkin_date TEXT,
                     last_attempt_date TEXT,
@@ -691,18 +716,34 @@ class RisingstonesAccountStore:
                 """
             )
 
-    def set_credential(self, account_key: str, credential: str) -> None:
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(risingstones_accounts)"
+                )
+            }
+            if "user_agent" not in columns:
+                connection.execute(
+                    "ALTER TABLE risingstones_accounts ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''"
+                )
+
+    def set_credential(
+        self, account_key: str, credentials: RisingstonesCredentials
+    ) -> None:
         now = datetime.now(RISINGSTONES_TIMEZONE).isoformat(timespec="seconds")
         with sqlite3.connect(self.path) as connection:
             connection.execute(
                 """
-                INSERT INTO risingstones_accounts (account_key, credential, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO risingstones_accounts (
+                    account_key, credential, user_agent, updated_at
+                )
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(account_key) DO UPDATE SET
                     credential = excluded.credential,
+                    user_agent = excluded.user_agent,
                     updated_at = excluded.updated_at
                 """,
-                (account_key, credential, now),
+                (account_key, credentials.cookie, credentials.user_agent, now),
             )
 
     def get_credential(self, account_key: str) -> str | None:
@@ -712,6 +753,20 @@ class RisingstonesAccountStore:
                 (account_key,),
             ).fetchone()
         return str(row[0]) if row else None
+
+    def get_credentials(self, account_key: str) -> RisingstonesCredentials | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT credential, user_agent
+                FROM risingstones_accounts
+                WHERE account_key = ?
+                """,
+                (account_key,),
+            ).fetchone()
+        if not row or not row[0] or not row[1]:
+            return None
+        return RisingstonesCredentials(cookie=str(row[0]), user_agent=str(row[1]))
 
     def remove(self, account_key: str) -> bool:
         with sqlite3.connect(self.path) as connection:
@@ -729,18 +784,25 @@ class RisingstonesAccountStore:
             )
         return cursor.rowcount > 0
 
-    def due_auto_checkins(self, day: str) -> list[tuple[str, str]]:
+    def due_auto_checkins(self, day: str) -> list[tuple[str, RisingstonesCredentials]]:
         with sqlite3.connect(self.path) as connection:
             rows = connection.execute(
                 """
-                SELECT account_key, credential
+                SELECT account_key, credential, user_agent
                 FROM risingstones_accounts
                 WHERE auto_checkin = 1
                   AND (last_attempt_date IS NULL OR last_attempt_date != ?)
                 """,
                 (day,),
             ).fetchall()
-        return [(str(account_key), str(credential)) for account_key, credential in rows]
+        return [
+            (
+                str(account_key),
+                RisingstonesCredentials(cookie=str(cookie), user_agent=str(user_agent)),
+            )
+            for account_key, cookie, user_agent in rows
+            if cookie and user_agent
+        ]
 
     def mark_attempt(self, account_key: str, day: str) -> None:
         with sqlite3.connect(self.path) as connection:
@@ -1619,8 +1681,8 @@ def create_help_text() -> str:
 [日历 (国服/国际服)] 获取FF近期活动日历
 [攻略 (副本等级) 副本名关键字 (文本)] 查简单副本攻略
 [石之家 (帖子/攻略/招募) (关键词) (数量)] 查石之家公开内容
-[石之家 幻化/部队] 使用主人Cookie或私聊Cookie查询登录态内容
-[石之家 绑定 Cookie请求头或BearerToken] 私聊绑定石之家账号
+[石之家 幻化/部队] 使用主人登录信息或私聊绑定查询登录态内容
+[石之家 绑定] 私聊获取 Chrome 控制台绑定脚本
 [石之家 我的/通知/统计/签到/自动签到 开启/关闭/解绑] 仅私聊个人账号管理
 [招募 大区名 (分类) (数量)] 获取指定大区招募板信息
 [看看微博] 获取FF官方微博新闻
@@ -2000,21 +2062,68 @@ def format_risingstones_recruits(
     return "\n".join(lines)
 
 
-def risingstones_credential_headers(credential: str) -> dict[str, str]:
-    """Build authenticated headers from a full Cookie header or a bearer token."""
-    value = credential.strip()
-    if value.lower().startswith("cookie:"):
-        value = value.split(":", 1)[1].strip()
-    if "=" in value:
-        return {"Cookie": value}
-    if value.lower().startswith("bearer "):
-        value = value.split(" ", 1)[1].strip()
-    return {"Authorization": f"Bearer {value}", "X-Token": value}
+def normalize_risingstones_cookie(value: str) -> str:
+    """Keep only the session cookie required by the Rising Stones API."""
+    text = value.strip()
+    if text.lower().startswith("cookie:"):
+        text = text.split(":", 1)[1].strip()
+    for item in text.split(";"):
+        candidate = item.strip()
+        if candidate.startswith("ff14risingstones="):
+            return candidate
+    return ""
 
 
-def configured_risingstones_cookie(config: dict | None) -> str:
-    """Read the optional operator-owned cookie without logging its value."""
-    return str((config or {}).get("risingstones_cookie", "") or "").strip()
+def parse_risingstones_binding(value: str) -> RisingstonesCredentials | None:
+    """Parse console output as `ff14risingstones=... | login User-Agent`."""
+    cookie_text, separator, user_agent = value.partition(RISINGSTONES_BINDING_SEPARATOR)
+    cookie = normalize_risingstones_cookie(cookie_text)
+    user_agent = user_agent.strip() if separator else ""
+    if not cookie or not user_agent:
+        return None
+    return RisingstonesCredentials(cookie=cookie, user_agent=user_agent)
+
+
+def risingstones_binding_guide() -> str:
+    return (
+        "请在 Chrome 登录石之家后打开开发者工具 Console，粘贴并运行下方脚本。\n"
+        "脚本会复制绑定信息；随后在私聊发送：石之家 绑定 <复制结果>\n\n"
+        "```javascript\n"
+        f"{RISINGSTONES_CONSOLE_SCRIPT}\n"
+        "```\n"
+        "如果 Chrome 阻止粘贴，请先在 Console 输入 allow pasting。"
+    )
+
+
+def configured_risingstones_credentials(
+    config: dict | None,
+) -> RisingstonesCredentials | None:
+    """Read operator credentials only when both cookie and login UA are present."""
+    config = config or {}
+    cookie = normalize_risingstones_cookie(
+        str(config.get("risingstones_cookie", "") or "")
+    )
+    user_agent = str(config.get("risingstones_user_agent", "") or "").strip()
+    if not cookie or not user_agent:
+        return None
+    return RisingstonesCredentials(cookie=cookie, user_agent=user_agent)
+
+
+def risingstones_proxy_url() -> str | None:
+    """Convert the shared proxy configuration into curl_cffi's proxy URL."""
+    options = proxy_request_options()
+    proxy_url = options.get("proxy")
+    proxy_auth = options.get("proxy_auth")
+    if not proxy_url:
+        return None
+    if not proxy_auth:
+        return str(proxy_url)
+    parsed = urlsplit(str(proxy_url))
+    username = quote(str(proxy_auth.login), safe="")
+    password = quote(str(proxy_auth.password), safe="")
+    return urlunsplit(
+        (parsed.scheme, f"{username}:{password}@{parsed.netloc}", parsed.path, "", "")
+    )
 
 
 def risingstones_account_key(event: AstrMessageEvent) -> str | None:
@@ -2031,29 +2140,64 @@ def is_risingstones_private_event(event: AstrMessageEvent) -> bool:
 
 
 async def risingstones_account_request(
-    credential: str,
+    credentials: RisingstonesCredentials,
     method: str,
     endpoint: str,
     *,
     params: dict[str, str] | None = None,
     data: dict[str, str] | None = None,
 ) -> dict:
-    """Call a private Rising Stones endpoint using browser headers and credentials."""
-    query = f"?{urlencode(params)}" if params else ""
-    response = await aiohttp_request(
-        method,
-        f"{RISINGSTONES_API_BASE}{endpoint}{query}",
-        timeout_seconds=20,
-        headers={
-            "Accept": "application/json, text/plain, */*",
-            "Referer": RISINGSTONES_WEB_BASE,
-            **risingstones_credential_headers(credential),
-        },
-        data=data,
+    """Call a private API with the login UA and Chrome-like TLS fingerprint."""
+    proxy_url = risingstones_proxy_url()
+    request_id = next(HTTP_REQUEST_COUNTER)
+    debug_log(
+        "risingstones.request.start",
+        proxy_used=bool(proxy_url),
+        request_id=request_id,
+        method=method.upper(),
+        endpoint=endpoint,
+        has_body=bool(data),
     )
-    if response.status != 200 or not isinstance(response.payload, dict):
-        raise RuntimeError(f"石之家请求失败: HTTP {response.status}")
-    payload = response.payload
+    request_kwargs = {
+        "params": params,
+        "data": data,
+        "timeout": 20,
+    }
+    if proxy_url:
+        request_kwargs["proxy"] = proxy_url
+    try:
+        async with curl_requests.AsyncSession(
+            impersonate=RISINGSTONES_IMPERSONATE,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": RISINGSTONES_WEB_BASE,
+                "User-Agent": credentials.user_agent,
+                "Cookie": credentials.cookie,
+            },
+        ) as session:
+            response = await session.request(
+                method, f"{RISINGSTONES_API_BASE}{endpoint}", **request_kwargs
+            )
+    except Exception as exc:
+        debug_log(
+            "risingstones.request.error",
+            proxy_used=bool(proxy_url),
+            request_id=request_id,
+            error_type=type(exc).__name__,
+        )
+        raise RuntimeError("石之家请求连接失败") from exc
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"石之家响应解析失败: HTTP {response.status_code}") from exc
+    debug_log(
+        "risingstones.request.finish",
+        proxy_used=bool(proxy_url),
+        request_id=request_id,
+        status=response.status_code,
+    )
+    if response.status_code != 200 or not isinstance(payload, dict):
+        raise RuntimeError(f"石之家请求失败: HTTP {response.status_code}")
     if payload.get("code") not in {0, 10000, 10001}:
         message = str(payload.get("msg") or "未知错误")
         if (
@@ -2066,9 +2210,9 @@ async def risingstones_account_request(
     return payload
 
 
-async def risingstones_verify_credential(credential: str) -> dict:
+async def risingstones_verify_credential(credentials: RisingstonesCredentials) -> dict:
     payload = await risingstones_account_request(
-        credential, "GET", "/home/userInfo/getUserInfo"
+        credentials, "GET", "/home/userInfo/getUserInfo"
     )
     data = payload.get("data")
     if not isinstance(data, dict) or not data.get("character_name"):
@@ -2076,10 +2220,12 @@ async def risingstones_verify_credential(credential: str) -> dict:
     return data
 
 
-async def risingstones_checkin(credential: str) -> tuple[bool, str]:
+async def risingstones_checkin(
+    credentials: RisingstonesCredentials,
+) -> tuple[bool, str]:
     tempsuid = str(uuid.uuid4())
     payload = await risingstones_account_request(
-        credential,
+        credentials,
         "POST",
         "/home/sign/signIn",
         params={"tempsuid": tempsuid},
@@ -2256,7 +2402,9 @@ def risingstones_stat_lines(kind: str, data: object) -> list[str]:
     ]
 
 
-async def risingstones_statistics(credential: str, kind: str) -> dict[str, list[str]]:
+async def risingstones_statistics(
+    credentials: RisingstonesCredentials, kind: str
+) -> dict[str, list[str]]:
     endpoints = {
         "frontline": ("/home/dataCenter/frontline1TotalNew", None),
         "ultimate": ("/home/dataCenter/gaoNanFirst1", None),
@@ -2272,7 +2420,7 @@ async def risingstones_statistics(credential: str, kind: str) -> dict[str, list[
         endpoint, params = endpoints[current_kind]
         try:
             payload = await risingstones_account_request(
-                credential, "GET", endpoint, params=params
+                credentials, "GET", endpoint, params=params
             )
         except RuntimeError:
             if kind != "all":
@@ -2314,13 +2462,13 @@ def risingstones_glamour_url(glamour_id: object) -> str:
 
 
 async def risingstones_glamour_rows(
-    credential: str, query: RisingstonesGlamourQuery
+    credentials: RisingstonesCredentials, query: RisingstonesGlamourQuery
 ) -> list[dict]:
     if query.mode == "detail":
         if not query.value or not query.value.isdigit():
             raise ValueError("幻化详情需要数字 ID")
         payload = await risingstones_account_request(
-            credential,
+            credentials,
             "GET",
             "/home/glamour/glamourDetail",
             params={"id": query.value},
@@ -2332,7 +2480,7 @@ async def risingstones_glamour_rows(
         if not query.value:
             raise ValueError("装备检索需要装备名称")
         equipment_payload = await risingstones_account_request(
-            credential,
+            credentials,
             "GET",
             "/home/gameData/searchEquip",
             params={"page": "1", "limit": "10", "name": query.value},
@@ -2355,7 +2503,7 @@ async def risingstones_glamour_rows(
         if not equipment_id:
             return []
         payload = await risingstones_account_request(
-            credential,
+            credentials,
             "GET",
             "/common/search",
             params={
@@ -2368,7 +2516,7 @@ async def risingstones_glamour_rows(
         )
     elif query.value:
         payload = await risingstones_account_request(
-            credential,
+            credentials,
             "GET",
             "/common/search",
             params={
@@ -2380,7 +2528,7 @@ async def risingstones_glamour_rows(
         )
     else:
         payload = await risingstones_account_request(
-            credential,
+            credentials,
             "GET",
             "/home/glamour/glamoursList",
             params={"page": "1", "limit": str(query.limit)},
@@ -2454,13 +2602,13 @@ def parse_risingstones_guild_query(value: str) -> RisingstonesGuildQuery:
 
 
 async def risingstones_guild_rows(
-    credential: str, query: RisingstonesGuildQuery
+    credentials: RisingstonesCredentials, query: RisingstonesGuildQuery
 ) -> list[dict]:
     if query.mode == "detail":
         if not query.value or not query.value.isdigit():
             raise ValueError("部队详情需要数字 ID")
         payload = await risingstones_account_request(
-            credential,
+            credentials,
             "GET",
             "/home/recruit/getRecruitGuildDetail",
             params={"id": query.value},
@@ -2472,7 +2620,7 @@ async def risingstones_guild_rows(
     if query.value:
         params["guild_name"] = query.value
     payload = await risingstones_account_request(
-        credential, "GET", "/home/recruit/recruitGuildList", params=params
+        credentials, "GET", "/home/recruit/recruitGuildList", params=params
     )
     data = payload.get("data")
     rows = data.get("rows") if isinstance(data, dict) else None
@@ -5736,8 +5884,8 @@ class TataruPlugin(Star):
     def ffxiv_icon_font_path(self) -> str:
         return str(self.config.get("ffxiv_icon_font_path", "") or "").strip()
 
-    def risingstones_owner_cookie(self) -> str:
-        return configured_risingstones_cookie(self.config)
+    def risingstones_owner_credentials(self) -> RisingstonesCredentials | None:
+        return configured_risingstones_credentials(self.config)
 
     def risingstones_checkin_hour(self) -> int:
         try:
@@ -5868,24 +6016,29 @@ class TataruPlugin(Star):
         if action not in personal_actions | session_actions:
             return None
         account_key = None
-        credential = None
+        credentials = None
         if action in personal_actions:
             if not is_risingstones_private_event(event):
-                return "石之家本人信息、签到和自动签到仅支持私聊，并且需要先私聊绑定 Cookie。"
+                return "石之家本人信息、签到和自动签到仅支持私聊，并且需要先私聊完成账号绑定。"
             account_key = risingstones_account_key(event)
             if not account_key:
                 return "无法识别当前私聊账号，请更换平台后重试。"
 
             if action == "绑定":
-                credential = argument.removeprefix("Cookie:").strip()
-                if not credential:
-                    return "绑定格式：石之家 绑定 Cookie 请求头或 Bearer Token"
+                if not argument:
+                    return risingstones_binding_guide()
+                credentials = parse_risingstones_binding(argument)
+                if not credentials:
+                    return (
+                        "绑定信息格式不正确。请发送 `石之家 绑定` 获取 Chrome 控制台脚本，"
+                        "再将复制结果在私聊中发送给机器人。"
+                    )
                 try:
-                    profile = await risingstones_verify_credential(credential)
+                    profile = await risingstones_verify_credential(credentials)
                 except Exception as exc:
                     logger.warning(f"石之家凭据验证失败: {exc}")
-                    return "石之家凭据验证失败，请确认 Cookie 请求头或 Token 仍然有效。"
-                self.risingstones_accounts.set_credential(account_key, credential)
+                    return "石之家凭据验证失败，请重新登录石之家后执行 `石之家 绑定` 获取新的绑定信息。"
+                self.risingstones_accounts.set_credential(account_key, credentials)
                 character_name = str(profile.get("character_name") or "已绑定角色")
                 server = "@".join(
                     part
@@ -5901,27 +6054,28 @@ class TataruPlugin(Star):
                 self.risingstones_accounts.remove(account_key)
                 return "石之家账号凭据和自动签到设置已移除。"
 
-            credential = self.risingstones_accounts.get_credential(account_key)
-            if not credential:
-                return (
-                    "尚未通过私聊绑定石之家 Cookie，请先发送：石之家 绑定 Cookie 请求头"
-                )
+            credentials = self.risingstones_accounts.get_credentials(account_key)
+            if not credentials:
+                return "尚未完成石之家账号绑定，请先在私聊发送：石之家 绑定"
         else:
             if is_risingstones_private_event(event):
                 account_key = risingstones_account_key(event)
-                credential = (
-                    self.risingstones_accounts.get_credential(account_key)
+                credentials = (
+                    self.risingstones_accounts.get_credentials(account_key)
                     if account_key
                     else None
                 )
-            credential = credential or self.risingstones_owner_cookie()
-            if not credential:
-                return "石之家幻化和部队招待需要主人在插件设置中填写石之家 Cookie，或在私聊中绑定 Cookie。"
+            credentials = credentials or self.risingstones_owner_credentials()
+            if not credentials:
+                return (
+                    "石之家幻化和部队招待需要主人在插件设置中同时填写石之家 Cookie 和登录 User-Agent，"
+                    "或在私聊中发送 `石之家 绑定` 完成绑定。"
+                )
 
         if action == "我的":
             try:
                 payload = await risingstones_account_request(
-                    credential, "GET", "/home/userInfo/getUserInfo"
+                    credentials, "GET", "/home/userInfo/getUserInfo"
                 )
             except Exception as exc:
                 logger.warning(f"石之家档案查询失败: {exc}")
@@ -5936,7 +6090,7 @@ class TataruPlugin(Star):
         if action == "通知":
             try:
                 payload = await risingstones_account_request(
-                    credential, "GET", "/home/sysMsg/getTip"
+                    credentials, "GET", "/home/sysMsg/getTip"
                 )
             except Exception as exc:
                 logger.warning(f"石之家通知查询失败: {exc}")
@@ -5951,7 +6105,7 @@ class TataruPlugin(Star):
         if action == "统计":
             kind = parse_risingstones_stat_kind(argument)
             try:
-                statistics = await risingstones_statistics(credential, kind)
+                statistics = await risingstones_statistics(credentials, kind)
             except Exception as exc:
                 logger.warning(f"石之家统计查询失败: {exc}")
                 return "石之家统计查询失败，请检查凭据是否过期后重新绑定。"
@@ -5962,12 +6116,12 @@ class TataruPlugin(Star):
         if action == "幻化":
             query = parse_risingstones_glamour_query(argument)
             try:
-                rows = await risingstones_glamour_rows(credential, query)
+                rows = await risingstones_glamour_rows(credentials, query)
             except ValueError as exc:
                 return str(exc)
             except Exception as exc:
                 logger.warning(f"石之家幻化查询失败: {exc}")
-                return "石之家幻化查询失败，请检查私聊凭据或插件设置页的石之家主人 Cookie。"
+                return "石之家幻化查询失败，请检查私聊绑定信息或插件设置页的石之家 Cookie 和登录 User-Agent。"
             if not rows:
                 return "没有找到符合条件的石之家幻化投稿。"
             return format_risingstones_glamour(query, rows)
@@ -5975,12 +6129,12 @@ class TataruPlugin(Star):
         if action == "部队":
             query = parse_risingstones_guild_query(argument)
             try:
-                rows = await risingstones_guild_rows(credential, query)
+                rows = await risingstones_guild_rows(credentials, query)
             except ValueError as exc:
                 return str(exc)
             except Exception as exc:
                 logger.warning(f"石之家部队招待查询失败: {exc}")
-                return "石之家部队招待查询失败，请检查私聊凭据或插件设置页的石之家主人 Cookie。"
+                return "石之家部队招待查询失败，请检查私聊绑定信息或插件设置页的石之家 Cookie 和登录 User-Agent。"
             if not rows:
                 return "没有找到符合条件的石之家部队招待。"
             return format_risingstones_guilds(query, rows)
@@ -5996,7 +6150,7 @@ class TataruPlugin(Star):
             return "石之家自动签到已关闭。"
 
         try:
-            _, message = await risingstones_checkin(credential)
+            _, message = await risingstones_checkin(credentials)
         except Exception as exc:
             logger.warning(f"石之家手动签到失败: {exc}")
             return "石之家签到失败，请检查凭据是否过期后重新绑定。"
@@ -6246,10 +6400,10 @@ class TataruPlugin(Star):
                 if now.hour == self.risingstones_checkin_hour():
                     day = now.date().isoformat()
                     accounts = self.risingstones_accounts.due_auto_checkins(day)
-                    for account_key, credential in accounts:
+                    for account_key, credentials in accounts:
                         self.risingstones_accounts.mark_attempt(account_key, day)
                         try:
-                            _, message = await risingstones_checkin(credential)
+                            _, message = await risingstones_checkin(credentials)
                             self.risingstones_accounts.mark_checkin(account_key, day)
                             debug_log(
                                 "risingstones.auto_checkin.success",

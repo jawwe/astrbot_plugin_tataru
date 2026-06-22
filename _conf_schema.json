@@ -87,6 +87,12 @@
     "description": "石之家主人 Cookie",
     "type": "string",
     "default": "",
-    "hint": "可选。填写石之家网页请求的完整 Cookie 值，用于幻化投稿和部队招待等需要登录态但不查询个人资料的功能。不要公开分享；插件日志不会输出该值。"
+    "hint": "可选。仅填写 ff14risingstones=...；须与下方登录 User-Agent 成对填写。私聊发送“石之家 绑定”可获取 Chrome 控制台提取脚本。不要公开分享；插件日志不会输出该值。"
+  },
+  "risingstones_user_agent": {
+    "description": "石之家主人登录 User-Agent",
+    "type": "string",
+    "default": "",
+    "hint": "可选。填写登录石之家时浏览器的完整 User-Agent，必须与石之家主人 Cookie 来自同一次登录。私聊发送“石之家 绑定”可获取提取脚本。"
   }
 }

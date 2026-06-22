@@ -170,32 +170,48 @@ def test_risingstones_account_store_and_credentials(plugin_module, tmp_path) -> 
     """Keep credentials isolated per account and auto check-ins bounded by day."""
     store = plugin_module.RisingstonesAccountStore(tmp_path / "risingstones.sqlite3")
     store.initialize()
-    store.set_credential("qq:10001", "session=abc")
-    assert store.get_credential("qq:10001") == "session=abc"
+    credentials = plugin_module.RisingstonesCredentials(
+        cookie="ff14risingstones=abc", user_agent="Mozilla/5.0 Test"
+    )
+    store.set_credential("qq:10001", credentials)
+    assert store.get_credential("qq:10001") == "ff14risingstones=abc"
+    assert store.get_credentials("qq:10001") == credentials
     assert store.due_auto_checkins("2026-06-22") == []
 
     assert store.set_auto_checkin("qq:10001", True)
-    assert store.due_auto_checkins("2026-06-22") == [("qq:10001", "session=abc")]
+    assert store.due_auto_checkins("2026-06-22") == [("qq:10001", credentials)]
     store.mark_attempt("qq:10001", "2026-06-22")
     assert store.due_auto_checkins("2026-06-22") == []
-    assert store.due_auto_checkins("2026-06-23") == [("qq:10001", "session=abc")]
+    assert store.due_auto_checkins("2026-06-23") == [("qq:10001", credentials)]
     assert store.remove("qq:10001")
     assert store.get_credential("qq:10001") is None
 
-    assert plugin_module.risingstones_credential_headers("session=abc") == {
-        "Cookie": "session=abc"
-    }
-    assert plugin_module.risingstones_credential_headers("Bearer abc") == {
-        "Authorization": "Bearer abc",
-        "X-Token": "abc",
-    }
     assert (
-        plugin_module.configured_risingstones_cookie(
-            {"risingstones_cookie": "session=owner"}
+        plugin_module.normalize_risingstones_cookie(
+            "other=value; ff14risingstones=abc; trailing=value"
         )
-        == "session=owner"
+        == "ff14risingstones=abc"
     )
-    assert plugin_module.configured_risingstones_cookie(None) == ""
+    assert (
+        plugin_module.parse_risingstones_binding(
+            "ff14risingstones=abc | Mozilla/5.0 Test"
+        )
+        == credentials
+    )
+    assert plugin_module.parse_risingstones_binding("ff14risingstones=abc") is None
+    assert (
+        plugin_module.configured_risingstones_credentials(
+            {
+                "risingstones_cookie": "other=value; ff14risingstones=abc",
+                "risingstones_user_agent": "Mozilla/5.0 Test",
+            }
+        )
+        == credentials
+    )
+    assert plugin_module.configured_risingstones_credentials(None) is None
+    guide = plugin_module.risingstones_binding_guide()
+    assert "ff14risingstones" in guide
+    assert "navigator.userAgent" in guide
 
 
 def test_risingstones_personal_actions_never_use_owner_cookie(
@@ -208,7 +224,10 @@ def test_risingstones_personal_actions_never_use_owner_cookie(
             return False
 
     plugin = object.__new__(plugin_module.TataruPlugin)
-    plugin.config = {"risingstones_cookie": "session=owner"}
+    plugin.config = {
+        "risingstones_cookie": "ff14risingstones=owner",
+        "risingstones_user_agent": "Mozilla/5.0 Test",
+    }
 
     async def no_glamour_rows(*_args, **_kwargs) -> list[dict]:
         return []
