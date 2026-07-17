@@ -650,3 +650,108 @@ def test_admin_page_keeps_successful_writes_distinct_from_refresh_failures() -> 
     assert "async function refreshAfterWrite" in page_script
     assert "页面刷新失败" in page_script
     assert "await refreshAfterWrite(loadOverview, successMessage)" in page_script
+
+
+def test_base_data_cache_serves_name_sources(plugin_module, tmp_path, monkeypatch):
+    """Persistent base data cache feeds world, duty, map, and guide name lookups."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.CN_WORLD_NAME_CACHE = None
+    plugin_module.GARLAND_CORE_DATA = None
+    plugin_module.DUNGEON_NOTE_CACHE = None
+
+    plugin_module.write_base_data_cache(
+        {
+            "version": plugin_module.BASE_DATA_CACHE_VERSION,
+            "updated_at": "2026-07-17T00:00:00",
+            "worlds": {
+                "银泪湖": {
+                    "id": 1183,
+                    "data_centre": "猫小胖",
+                    "name": "银泪湖",
+                }
+            },
+            "xivapi_sheets": {
+                "ContentFinderCondition": {
+                    "1094": {
+                        "row_id": 1094,
+                        "fields": {
+                            "Name": "妖星乱舞绝境战",
+                            "ContentType": {"fields": {"Name": "绝境战"}},
+                        },
+                    }
+                }
+            },
+            "garland_core": {
+                "locationIndex": {"1": {"name": "拉诺西亚"}},
+                "jobs": [{"name": "刻木匠"}],
+            },
+            "dungeon_notes": {"100": {"测试副本": "test-duty"}},
+        }
+    )
+
+    async def fail_get(*_args, **_kwargs):
+        raise AssertionError("cache-backed lookups should not call network")
+
+    monkeypatch.setattr(plugin_module, "aiohttp_get", fail_get)
+
+    worlds = asyncio.run(plugin_module.load_cn_world_names())
+    rows = asyncio.run(
+        plugin_module.get_xivapi_sheet_rows(
+            "ContentFinderCondition",
+            {1094},
+            "Name,ContentType.Name",
+        )
+    )
+    duty_ids = asyncio.run(plugin_module.resolve_party_duty_ids("妖星"))
+    location_name = asyncio.run(
+        plugin_module.garland_core_value("locationIndex.1.name")
+    )
+    notes = asyncio.run(plugin_module.fetch_dungeon_notes())
+
+    assert worlds["银泪湖"]["id"] == 1183
+    assert plugin_module.xivapi_field_text(rows[1094], "Name") == "妖星乱舞绝境战"
+    assert duty_ids == [1094]
+    assert location_name == "拉诺西亚"
+    assert notes == {"100": {"测试副本": "test-duty"}}
+
+
+def test_missing_world_cache_fetches_and_persists(plugin_module, tmp_path, monkeypatch):
+    """When no name cache exists, the loader fetches fresh data and writes it."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.CN_WORLD_NAME_CACHE = None
+
+    async def fake_get(url, *_args, **_kwargs):
+        if "sheet/World" in url and "after=" not in url:
+            return {
+                "rows": [
+                    {
+                        "row_id": 1183,
+                        "fields": {
+                            "Name": "银泪湖",
+                            "DataCenter": {"fields": {"Name": "猫小胖"}},
+                        },
+                    }
+                ]
+            }
+        return {"rows": []}
+
+    monkeypatch.setattr(plugin_module, "aiohttp_get", fake_get)
+
+    worlds = asyncio.run(plugin_module.load_cn_world_names())
+    cached = plugin_module.read_base_data_cache()
+
+    assert worlds["银泪湖"]["data_centre"] == "猫小胖"
+    assert cached["worlds"]["银泪湖"]["id"] == 1183
+
+
+def test_base_data_refresh_waits_until_next_midnight(plugin_module):
+    """The background refresh loop schedules the next refresh for local midnight."""
+    now = plugin_module.datetime(2026, 7, 17, 23, 59, 30)
+    assert plugin_module.seconds_until_next_midnight(now) == 30
+
+    noon = plugin_module.datetime(2026, 7, 17, 12, 0, 0)
+    assert plugin_module.seconds_until_next_midnight(noon) == 12 * 60 * 60
