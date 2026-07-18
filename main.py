@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -1677,6 +1678,7 @@ def empty_base_data_cache() -> dict:
     return {
         "version": BASE_DATA_CACHE_VERSION,
         "updated_at": "",
+        "last_full_refresh_at": "",
         "worlds": {},
         "xivapi_sheets": {},
         "garland_core": None,
@@ -1755,10 +1757,16 @@ def write_base_data_cache(cache: dict) -> dict:
     if not normalized.get("updated_at"):
         normalized["updated_at"] = datetime.now().isoformat(timespec="seconds")
     BASE_DATA_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    BASE_DATA_CACHE_PATH.write_text(
-        json.dumps(normalized, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    temp_path = BASE_DATA_CACHE_PATH.with_name(f"{BASE_DATA_CACHE_PATH.name}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(normalized, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(BASE_DATA_CACHE_PATH)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
     return apply_base_data_cache(normalized)
 
 
@@ -1808,26 +1816,41 @@ def seconds_until_next_midnight(now: datetime | None = None) -> int:
 
 def base_data_cache_is_stale(cache: dict | None = None) -> bool:
     cache = cache or read_base_data_cache()
-    updated_at = str(cache.get("updated_at") or "")
-    if not updated_at:
+    last_full_refresh_at = str(cache.get("last_full_refresh_at") or "")
+    if not last_full_refresh_at:
         return True
     try:
-        updated = datetime.fromisoformat(updated_at)
+        updated = datetime.fromisoformat(last_full_refresh_at)
     except ValueError:
         return True
     return updated.date() < datetime.now().date()
 
 
-def schedule_base_data_refresh(reason: str = "missing") -> None:
+def clear_base_data_refresh_task(task: asyncio.Task) -> None:
+    global BASE_DATA_REFRESH_TASK
+    if BASE_DATA_REFRESH_TASK is task:
+        BASE_DATA_REFRESH_TASK = None
+
+
+def schedule_base_data_refresh(reason: str = "missing") -> asyncio.Task | None:
     global BASE_DATA_REFRESH_TASK
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return
+        return None
     if BASE_DATA_REFRESH_TASK and not BASE_DATA_REFRESH_TASK.done():
-        return
+        return BASE_DATA_REFRESH_TASK
     logger.info(f"基础数据缓存后台刷新已触发: {reason}")
     BASE_DATA_REFRESH_TASK = loop.create_task(refresh_base_data_cache(reason))
+    BASE_DATA_REFRESH_TASK.add_done_callback(clear_base_data_refresh_task)
+    return BASE_DATA_REFRESH_TASK
+
+
+async def wait_for_base_data_refresh(reason: str) -> bool:
+    task = schedule_base_data_refresh(reason)
+    if task is None:
+        return False
+    return await task
 
 
 async def fetch_xivapi_sheet_all_rows(sheet: str, fields: str) -> dict[int, dict]:
@@ -1847,21 +1870,32 @@ async def fetch_xivapi_sheet_all_rows(sheet: str, fields: str) -> dict[int, dict
             f"XIVAPI {sheet} 基础数据",
             use_api_user_agent=True,
         )
-        payload_rows = payload.get("rows") if isinstance(payload, dict) else None
-        if not isinstance(payload_rows, list) or not payload_rows:
+        if not isinstance(payload, dict):
+            raise ValueError(f"XIVAPI {sheet} pagination returned invalid payload")
+        payload_rows = payload.get("rows")
+        if not isinstance(payload_rows, list):
+            raise ValueError(f"XIVAPI {sheet} pagination returned invalid rows")
+        if not payload_rows:
             break
         for row in payload_rows:
             if not isinstance(row, dict) or row.get("row_id") is None:
-                continue
+                raise ValueError(f"XIVAPI {sheet} pagination returned invalid row")
             try:
                 rows_by_id[int(row["row_id"])] = row
             except (TypeError, ValueError):
-                continue
-        last_row_id = payload_rows[-1].get("row_id")
-        if not last_row_id or last_row_id in seen_after:
-            break
+                raise ValueError(
+                    f"XIVAPI {sheet} pagination returned invalid row id"
+                ) from None
+        try:
+            last_row_id = int(payload_rows[-1]["row_id"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(
+                f"XIVAPI {sheet} pagination returned invalid cursor"
+            ) from None
+        if last_row_id in seen_after:
+            raise ValueError(f"XIVAPI {sheet} pagination cursor did not advance")
         seen_after.add(last_row_id)
-        if int(last_row_id) >= 65535:
+        if last_row_id >= 65535:
             break
         after = last_row_id
     return rows_by_id
@@ -1905,54 +1939,51 @@ async def fetch_dungeon_notes_from_web() -> dict[str, dict[str, str]]:
 
 
 async def refresh_base_data_cache(reason: str = "scheduled") -> bool:
-    global CN_WORLD_NAME_CACHE, GARLAND_CORE_DATA, DUNGEON_NOTE_CACHE
+    cache = deepcopy(read_base_data_cache())
 
-    cache = read_base_data_cache()
-    updated = False
+    try:
+        worlds, world_rows = await fetch_cn_world_data_from_api()
+        if not worlds or not world_rows:
+            raise ValueError("XIVAPI World 基础数据为空")
 
-    worlds, world_rows = await fetch_cn_world_data_from_api()
-    if worlds:
+        duty_rows = await fetch_xivapi_sheet_all_rows(
+            "ContentFinderCondition", "Name,ContentType.Name"
+        )
+        if not duty_rows:
+            raise ValueError("XIVAPI ContentFinderCondition 基础数据为空")
+
+        garland_core = await safe_aiohttp_get(
+            garland_url("core", "data"),
+            "Garland core 基础数据",
+            use_api_user_agent=True,
+        )
+        if not isinstance(garland_core, dict) or not garland_core:
+            raise ValueError("Garland core 基础数据为空")
+
+        dungeon_notes = await fetch_dungeon_notes_from_web()
+        if not dungeon_notes:
+            raise ValueError("攻略副本列表基础数据为空")
+
         cache["worlds"] = worlds
         cache.setdefault("xivapi_sheets", {})["World"] = {
             str(row_id): row for row_id, row in world_rows.items()
         }
-        CN_WORLD_NAME_CACHE = worlds
-        updated = True
-
-    duty_rows = await fetch_xivapi_sheet_all_rows(
-        "ContentFinderCondition", "Name,ContentType.Name"
-    )
-    if duty_rows:
         cache.setdefault("xivapi_sheets", {})["ContentFinderCondition"] = {
             str(row_id): row for row_id, row in duty_rows.items()
         }
-        updated = True
-
-    garland_core = await safe_aiohttp_get(
-        garland_url("core", "data"),
-        "Garland core 基础数据",
-        use_api_user_agent=True,
-    )
-    if isinstance(garland_core, dict):
         cache["garland_core"] = garland_core
-        GARLAND_CORE_DATA = garland_core
-        updated = True
-
-    try:
-        dungeon_notes = await fetch_dungeon_notes_from_web()
+        cache["dungeon_notes"] = dungeon_notes
+        refreshed_at = datetime.now().isoformat(timespec="seconds")
+        cache["last_full_refresh_at"] = refreshed_at
+        cache["updated_at"] = refreshed_at
+        write_base_data_cache(cache)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        logger.warning(f"攻略副本列表基础数据刷新失败: {exc}")
-    else:
-        if dungeon_notes:
-            cache["dungeon_notes"] = dungeon_notes
-            DUNGEON_NOTE_CACHE = dungeon_notes
-            updated = True
-
-    if not updated:
+        logger.warning(f"基础数据缓存完整刷新失败: {exc}")
+        debug_log("base_data.refresh", reason=reason, updated=False)
         return False
 
-    cache["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    write_base_data_cache(cache)
     debug_log("base_data.refresh", reason=reason, updated=True)
     return True
 
@@ -6209,7 +6240,7 @@ async def get_xivapi_sheet_rows(
         f"{XIVAPI_BASE_URL}/sheet/{sheet}?{params}", use_api_user_agent=True
     )
     if not isinstance(payload, dict):
-        return {}
+        return result
 
     rows = payload.get("rows")
     if not isinstance(rows, list):
@@ -7735,7 +7766,7 @@ class TataruPlugin(Star):
         while True:
             try:
                 if base_data_cache_is_stale():
-                    await refresh_base_data_cache("startup_or_stale")
+                    await wait_for_base_data_refresh("startup_or_stale")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -7744,7 +7775,7 @@ class TataruPlugin(Star):
             await asyncio.sleep(seconds_until_next_midnight())
 
             try:
-                await refresh_base_data_cache("midnight")
+                await wait_for_base_data_refresh("midnight")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -7967,11 +7998,23 @@ class TataruPlugin(Star):
             return event.plain_result("暖暖获取失败，请看qq文档： " + QQ_DOC_URL)
 
     async def terminate(self):
+        global BASE_DATA_REFRESH_TASK
+
         if self.calendar_task:
             self.calendar_task.cancel()
+        refresh_tasks = set()
         if self.base_data_cache_task:
             self.base_data_cache_task.cancel()
+            refresh_tasks.add(self.base_data_cache_task)
+        active_refresh_task = BASE_DATA_REFRESH_TASK
+        if active_refresh_task:
+            active_refresh_task.cancel()
+            refresh_tasks.add(active_refresh_task)
         if self.risingstones_checkin_task:
             self.risingstones_checkin_task.cancel()
+        if refresh_tasks:
+            await asyncio.gather(*refresh_tasks, return_exceptions=True)
+        if BASE_DATA_REFRESH_TASK is active_refresh_task:
+            BASE_DATA_REFRESH_TASK = None
         debug_log("plugin.terminate")
         logger.info("Tataru AstrBot plugin terminated.")
