@@ -1,6 +1,7 @@
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from functools import wraps
 import html
@@ -385,6 +386,10 @@ RISINGSTONES_MAX_LIMIT = 20
 RISINGSTONES_DB_PATH = DATA_DIR / "risingstones.sqlite3"
 ADMIN_DB_PATH = DATA_DIR / "admin.sqlite3"
 RISINGSTONES_TIMEZONE = ZoneInfo("Asia/Shanghai")
+BASE_DATA_CACHE_VERSION = 1
+BASE_DATA_CACHE_PATH = PLUGIN_DIR / ".cache" / "base_data_cache.json"
+BASE_DATA_CACHE: dict | None = None
+BASE_DATA_REFRESH_TASK: asyncio.Task | None = None
 RISINGSTONES_IMPERSONATE = "chrome124"
 RISINGSTONES_BINDING_SEPARATOR = " | "
 RISINGSTONES_CONSOLE_SCRIPT = """fetch(
@@ -397,6 +402,7 @@ RISINGSTONES_CONSOLE_SCRIPT = """fetch(
 DATA_CENTRES = ["陆行鸟", "莫古力", "猫小胖", "豆豆柴"]
 CN_WORLD_DATA_CENTRES = set(DATA_CENTRES)
 CN_WORLD_NAME_CACHE: dict[str, dict] | None = None
+DUNGEON_NOTE_CACHE: dict[str, dict[str, str]] | None = None
 HOUSE_DEFAULT_LISTINGS = 10
 HOUSE_MAX_LISTINGS = 40
 HOUSE_SERVER_IDS = {
@@ -1666,6 +1672,320 @@ async def safe_aiohttp_get(url: str, context: str, **kwargs):
     except Exception as exc:
         logger.warning(f"{context}请求失败: {exc}")
         return None
+
+
+def empty_base_data_cache() -> dict:
+    return {
+        "version": BASE_DATA_CACHE_VERSION,
+        "updated_at": "",
+        "last_full_refresh_at": "",
+        "worlds": {},
+        "xivapi_sheets": {},
+        "garland_core": None,
+        "dungeon_notes": {},
+    }
+
+
+def normalize_base_data_cache(cache: dict | None) -> dict:
+    normalized = empty_base_data_cache()
+    if isinstance(cache, dict):
+        normalized.update(cache)
+    normalized["version"] = BASE_DATA_CACHE_VERSION
+    if not isinstance(normalized.get("worlds"), dict):
+        normalized["worlds"] = {}
+    if not isinstance(normalized.get("xivapi_sheets"), dict):
+        normalized["xivapi_sheets"] = {}
+    if not isinstance(normalized.get("dungeon_notes"), dict):
+        normalized["dungeon_notes"] = {}
+    return normalized
+
+
+def apply_base_data_cache(cache: dict) -> dict:
+    global BASE_DATA_CACHE, CN_WORLD_NAME_CACHE, GARLAND_CORE_DATA, DUNGEON_NOTE_CACHE
+
+    normalized = normalize_base_data_cache(cache)
+    BASE_DATA_CACHE = normalized
+
+    worlds = normalized.get("worlds")
+    if isinstance(worlds, dict) and worlds:
+        CN_WORLD_NAME_CACHE = {
+            str(name): world
+            for name, world in worlds.items()
+            if isinstance(world, dict)
+        }
+
+    garland_core = normalized.get("garland_core")
+    if isinstance(garland_core, dict):
+        GARLAND_CORE_DATA = garland_core
+
+    dungeon_notes = normalized.get("dungeon_notes")
+    if isinstance(dungeon_notes, dict) and dungeon_notes:
+        DUNGEON_NOTE_CACHE = {
+            str(level): {
+                str(name): str(page_id)
+                for name, page_id in items.items()
+                if name and page_id
+            }
+            for level, items in dungeon_notes.items()
+            if isinstance(items, dict)
+        }
+    return normalized
+
+
+def read_base_data_cache() -> dict:
+    global BASE_DATA_CACHE
+
+    if BASE_DATA_CACHE is not None:
+        return BASE_DATA_CACHE
+    if not BASE_DATA_CACHE_PATH.exists():
+        BASE_DATA_CACHE = empty_base_data_cache()
+        return BASE_DATA_CACHE
+    try:
+        cache = json.loads(BASE_DATA_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(f"基础数据缓存读取失败: {exc}")
+        BASE_DATA_CACHE = empty_base_data_cache()
+        return BASE_DATA_CACHE
+    if not isinstance(cache, dict) or cache.get("version") != BASE_DATA_CACHE_VERSION:
+        BASE_DATA_CACHE = empty_base_data_cache()
+        return BASE_DATA_CACHE
+    return apply_base_data_cache(cache)
+
+
+def write_base_data_cache(cache: dict) -> dict:
+    normalized = normalize_base_data_cache(cache)
+    if not normalized.get("updated_at"):
+        normalized["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    BASE_DATA_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = BASE_DATA_CACHE_PATH.with_name(f"{BASE_DATA_CACHE_PATH.name}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(normalized, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(BASE_DATA_CACHE_PATH)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return apply_base_data_cache(normalized)
+
+
+def update_base_data_cache(**values) -> dict:
+    cache = read_base_data_cache()
+    for key, value in values.items():
+        cache[key] = value
+    cache["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    return write_base_data_cache(cache)
+
+
+def cached_xivapi_sheet_rows(sheet: str) -> dict[int, dict]:
+    cache = read_base_data_cache()
+    sheets = cache.get("xivapi_sheets")
+    if not isinstance(sheets, dict):
+        return {}
+    rows = sheets.get(sheet)
+    if not isinstance(rows, dict):
+        return {}
+    result = {}
+    for row_id, row in rows.items():
+        try:
+            result[int(row_id)] = row
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def update_cached_xivapi_sheet_rows(sheet: str, rows: dict[int, dict]) -> None:
+    if not rows:
+        return
+    cache = read_base_data_cache()
+    sheets = cache.setdefault("xivapi_sheets", {})
+    sheet_rows = sheets.setdefault(sheet, {})
+    for row_id, row in rows.items():
+        sheet_rows[str(row_id)] = row
+    cache["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    write_base_data_cache(cache)
+
+
+def seconds_until_next_midnight(now: datetime | None = None) -> int:
+    now = now or datetime.now()
+    tomorrow = now.date() + timedelta(days=1)
+    next_midnight = datetime.combine(tomorrow, datetime.min.time())
+    return max(1, int((next_midnight - now).total_seconds()))
+
+
+def base_data_cache_is_stale(cache: dict | None = None) -> bool:
+    cache = cache or read_base_data_cache()
+    last_full_refresh_at = str(cache.get("last_full_refresh_at") or "")
+    if not last_full_refresh_at:
+        return True
+    try:
+        updated = datetime.fromisoformat(last_full_refresh_at)
+    except ValueError:
+        return True
+    return updated.date() < datetime.now().date()
+
+
+def clear_base_data_refresh_task(task: asyncio.Task) -> None:
+    global BASE_DATA_REFRESH_TASK
+    if BASE_DATA_REFRESH_TASK is task:
+        BASE_DATA_REFRESH_TASK = None
+
+
+def schedule_base_data_refresh(reason: str = "missing") -> asyncio.Task | None:
+    global BASE_DATA_REFRESH_TASK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    if BASE_DATA_REFRESH_TASK and not BASE_DATA_REFRESH_TASK.done():
+        return BASE_DATA_REFRESH_TASK
+    logger.info(f"基础数据缓存后台刷新已触发: {reason}")
+    BASE_DATA_REFRESH_TASK = loop.create_task(refresh_base_data_cache(reason))
+    BASE_DATA_REFRESH_TASK.add_done_callback(clear_base_data_refresh_task)
+    return BASE_DATA_REFRESH_TASK
+
+
+async def wait_for_base_data_refresh(reason: str) -> bool:
+    task = schedule_base_data_refresh(reason)
+    if task is None:
+        return False
+    return await task
+
+
+async def fetch_xivapi_sheet_all_rows(sheet: str, fields: str) -> dict[int, dict]:
+    rows_by_id: dict[int, dict] = {}
+    after = None
+    seen_after = set()
+    while True:
+        query = {
+            "fields": fields,
+            "language": "chs",
+            "limit": 500,
+        }
+        if after is not None:
+            query["after"] = after
+        payload = await safe_aiohttp_get(
+            f"{XIVAPI_BASE_URL}/sheet/{sheet}?{urlencode(query)}",
+            f"XIVAPI {sheet} 基础数据",
+            use_api_user_agent=True,
+        )
+        if not isinstance(payload, dict):
+            raise ValueError(f"XIVAPI {sheet} pagination returned invalid payload")
+        payload_rows = payload.get("rows")
+        if not isinstance(payload_rows, list):
+            raise ValueError(f"XIVAPI {sheet} pagination returned invalid rows")
+        if not payload_rows:
+            break
+        for row in payload_rows:
+            if not isinstance(row, dict) or row.get("row_id") is None:
+                raise ValueError(f"XIVAPI {sheet} pagination returned invalid row")
+            try:
+                rows_by_id[int(row["row_id"])] = row
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"XIVAPI {sheet} pagination returned invalid row id"
+                ) from None
+        try:
+            last_row_id = int(payload_rows[-1]["row_id"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(
+                f"XIVAPI {sheet} pagination returned invalid cursor"
+            ) from None
+        if last_row_id in seen_after:
+            raise ValueError(f"XIVAPI {sheet} pagination cursor did not advance")
+        seen_after.add(last_row_id)
+        if last_row_id >= 65535:
+            break
+        after = last_row_id
+    return rows_by_id
+
+
+def cn_worlds_from_rows(rows: dict[int, dict]) -> dict[str, dict]:
+    worlds = {}
+    for row_id, row in rows.items():
+        name = xivapi_field_text(row, "Name")
+        data_centre = xivapi_field_text(row, "DataCenter", "Name")
+        if row_id >= 1000 and name and data_centre in CN_WORLD_DATA_CENTRES:
+            worlds[name] = {
+                "id": int(row_id),
+                "data_centre": data_centre,
+                "name": name,
+            }
+    return worlds
+
+
+async def fetch_cn_world_data_from_api() -> tuple[dict[str, dict], dict[int, dict]]:
+    rows = await fetch_xivapi_sheet_all_rows("World", "Name,DataCenter.Name")
+    return cn_worlds_from_rows(rows), rows
+
+
+async def fetch_dungeon_notes_from_web() -> dict[str, dict[str, str]]:
+    page = await aiohttp_get(DUNGEON_NOTE_URL, res_type="text")
+    if not page:
+        raise ValueError("获取攻略列表失败")
+
+    note_dict: dict[str, dict[str, str]] = {}
+    matches = re.findall(r"/duty/.*?</a>", page, flags=re.S)
+    for line in matches[:-3]:
+        try:
+            page_id = line.split(".htm", 1)[0].replace("/duty/", "")
+            dungeon_level = line.split("[", 1)[1].split("]", 1)[0]
+            dungeon_name = line.split("] ", 1)[1].split("\n", 1)[0]
+        except IndexError:
+            continue
+        note_dict.setdefault(dungeon_level, {})[html.unescape(dungeon_name)] = page_id
+    return note_dict
+
+
+async def refresh_base_data_cache(reason: str = "scheduled") -> bool:
+    cache = deepcopy(read_base_data_cache())
+
+    try:
+        worlds, world_rows = await fetch_cn_world_data_from_api()
+        if not worlds or not world_rows:
+            raise ValueError("XIVAPI World 基础数据为空")
+
+        duty_rows = await fetch_xivapi_sheet_all_rows(
+            "ContentFinderCondition", "Name,ContentType.Name"
+        )
+        if not duty_rows:
+            raise ValueError("XIVAPI ContentFinderCondition 基础数据为空")
+
+        garland_core = await safe_aiohttp_get(
+            garland_url("core", "data"),
+            "Garland core 基础数据",
+            use_api_user_agent=True,
+        )
+        if not isinstance(garland_core, dict) or not garland_core:
+            raise ValueError("Garland core 基础数据为空")
+
+        dungeon_notes = await fetch_dungeon_notes_from_web()
+        if not dungeon_notes:
+            raise ValueError("攻略副本列表基础数据为空")
+
+        cache["worlds"] = worlds
+        cache.setdefault("xivapi_sheets", {})["World"] = {
+            str(row_id): row for row_id, row in world_rows.items()
+        }
+        cache.setdefault("xivapi_sheets", {})["ContentFinderCondition"] = {
+            str(row_id): row for row_id, row in duty_rows.items()
+        }
+        cache["garland_core"] = garland_core
+        cache["dungeon_notes"] = dungeon_notes
+        refreshed_at = datetime.now().isoformat(timespec="seconds")
+        cache["last_full_refresh_at"] = refreshed_at
+        cache["updated_at"] = refreshed_at
+        write_base_data_cache(cache)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(f"基础数据缓存完整刷新失败: {exc}")
+        debug_log("base_data.refresh", reason=reason, updated=False)
+        return False
+
+    debug_log("base_data.refresh", reason=reason, updated=True)
+    return True
 
 
 def random_left_right() -> str:
@@ -3406,6 +3726,19 @@ async def resolve_party_duty_ids(search_text: str | None) -> list[int]:
         PARTY_DUTY_ID_CACHE[key] = PARTY_DUTY_ALIAS_IDS[key]
         return PARTY_DUTY_ID_CACHE[key]
 
+    cached_rows = cached_xivapi_sheet_rows("ContentFinderCondition")
+    if cached_rows:
+        cached_duty_ids = []
+        for row_id, row in cached_rows.items():
+            name = xivapi_field_text(row, "Name")
+            if name and key in normalize_party_duty_key(name):
+                cached_duty_ids.append(int(row_id))
+        if cached_duty_ids:
+            PARTY_DUTY_ID_CACHE[key] = cached_duty_ids
+            return cached_duty_ids
+    else:
+        schedule_base_data_refresh("duty name cache missing")
+
     query = f'Name~"{search_text}"'
     params = urlencode(
         {
@@ -3438,6 +3771,9 @@ async def resolve_party_duty_ids(search_text: str | None) -> list[int]:
                 continue
             if key in normalize_party_duty_key(name):
                 duty_ids.append(int(row_id))
+                update_cached_xivapi_sheet_rows(
+                    "ContentFinderCondition", {int(row_id): row}
+                )
 
     PARTY_DUTY_ID_CACHE[key] = duty_ids
     return duty_ids
@@ -3851,20 +4187,29 @@ async def get_bili_detail(bili_url: str) -> str:
 
 
 async def fetch_dungeon_notes() -> dict[str, dict[str, str]]:
-    page = await aiohttp_get(DUNGEON_NOTE_URL, res_type="text")
-    if not page:
-        raise ValueError("获取攻略列表失败")
+    global DUNGEON_NOTE_CACHE
 
-    note_dict: dict[str, dict[str, str]] = {}
-    matches = re.findall(r"/duty/.*?</a>", page, flags=re.S)
-    for line in matches[:-3]:
-        try:
-            page_id = line.split(".htm", 1)[0].replace("/duty/", "")
-            dungeon_level = line.split("[", 1)[1].split("]", 1)[0]
-            dungeon_name = line.split("] ", 1)[1].split("\n", 1)[0]
-        except IndexError:
-            continue
-        note_dict.setdefault(dungeon_level, {})[html.unescape(dungeon_name)] = page_id
+    if DUNGEON_NOTE_CACHE is not None:
+        return DUNGEON_NOTE_CACHE
+
+    cache = read_base_data_cache()
+    cached_notes = cache.get("dungeon_notes")
+    if isinstance(cached_notes, dict) and cached_notes:
+        DUNGEON_NOTE_CACHE = {
+            str(level): {
+                str(name): str(page_id)
+                for name, page_id in items.items()
+                if name and page_id
+            }
+            for level, items in cached_notes.items()
+            if isinstance(items, dict)
+        }
+        return DUNGEON_NOTE_CACHE
+
+    schedule_base_data_refresh("dungeon notes cache missing")
+    note_dict = await fetch_dungeon_notes_from_web()
+    DUNGEON_NOTE_CACHE = note_dict
+    update_base_data_cache(dungeon_notes=note_dict)
     return note_dict
 
 
@@ -3927,9 +4272,17 @@ def strip_xiv_tags(text: str) -> str:
 async def garland_core_value(path: str):
     global GARLAND_CORE_DATA
     if GARLAND_CORE_DATA is None:
-        GARLAND_CORE_DATA = await aiohttp_get(
-            garland_url("core", "data"), use_api_user_agent=True
-        )
+        cache = read_base_data_cache()
+        garland_core = cache.get("garland_core")
+        if isinstance(garland_core, dict):
+            GARLAND_CORE_DATA = garland_core
+        else:
+            schedule_base_data_refresh("garland core cache missing")
+            GARLAND_CORE_DATA = await aiohttp_get(
+                garland_url("core", "data"), use_api_user_agent=True
+            )
+            if isinstance(GARLAND_CORE_DATA, dict):
+                update_base_data_cache(garland_core=GARLAND_CORE_DATA)
     value = GARLAND_CORE_DATA
     for part in path.split("."):
         value = value[part]
@@ -5869,9 +6222,16 @@ async def get_xivapi_sheet_rows(
     if not ids:
         return {}
 
+    cached_rows = cached_xivapi_sheet_rows(sheet)
+    result = {row_id: cached_rows[row_id] for row_id in ids if row_id in cached_rows}
+    missing_ids = [row_id for row_id in ids if row_id not in result]
+    if not missing_ids:
+        return result
+    schedule_base_data_refresh(f"{sheet} row cache missing")
+
     params = urlencode(
         {
-            "rows": ",".join(str(row_id) for row_id in ids),
+            "rows": ",".join(str(row_id) for row_id in missing_ids),
             "fields": fields,
             "language": "chs",
         }
@@ -5880,16 +6240,19 @@ async def get_xivapi_sheet_rows(
         f"{XIVAPI_BASE_URL}/sheet/{sheet}?{params}", use_api_user_agent=True
     )
     if not isinstance(payload, dict):
-        return {}
+        return result
 
     rows = payload.get("rows")
     if not isinstance(rows, list):
-        return {}
-    return {
+        return result
+    fetched = {
         int(row["row_id"]): row
         for row in rows
         if isinstance(row, dict) and row.get("row_id") is not None
     }
+    update_cached_xivapi_sheet_rows(sheet, fetched)
+    result.update(fetched)
+    return result
 
 
 async def load_cn_world_names() -> dict[str, dict]:
@@ -5897,50 +6260,24 @@ async def load_cn_world_names() -> dict[str, dict]:
     if CN_WORLD_NAME_CACHE is not None:
         return CN_WORLD_NAME_CACHE
 
-    worlds = {}
-    after = None
-    seen_after = set()
-    while True:
-        query = {
-            "fields": "Name,DataCenter.Name",
-            "language": "chs",
-            "limit": 500,
+    cache = read_base_data_cache()
+    worlds = cache.get("worlds")
+    if isinstance(worlds, dict) and worlds:
+        CN_WORLD_NAME_CACHE = {
+            str(name): world
+            for name, world in worlds.items()
+            if isinstance(world, dict)
         }
-        if after is not None:
-            query["after"] = after
-        payload = await aiohttp_get(
-            f"{XIVAPI_BASE_URL}/sheet/World?{urlencode(query)}",
-            use_api_user_agent=True,
-        )
-        rows = payload.get("rows") if isinstance(payload, dict) else None
-        if not isinstance(rows, list) or not rows:
-            break
+        return CN_WORLD_NAME_CACHE
 
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            row_id = row.get("row_id")
-            name = xivapi_field_text(row, "Name")
-            data_centre = xivapi_field_text(row, "DataCenter", "Name")
-            if (
-                row_id
-                and row_id >= 1000
-                and name
-                and data_centre in CN_WORLD_DATA_CENTRES
-            ):
-                worlds[name] = {
-                    "id": int(row_id),
-                    "data_centre": data_centre,
-                    "name": name,
-                }
-
-        last_row_id = rows[-1].get("row_id")
-        if not last_row_id or last_row_id in seen_after:
-            break
-        seen_after.add(last_row_id)
-        if last_row_id >= 65535:
-            break
-        after = last_row_id
+    schedule_base_data_refresh("world name cache missing")
+    worlds, world_rows = await fetch_cn_world_data_from_api()
+    if worlds:
+        cache["worlds"] = worlds
+        cache.setdefault("xivapi_sheets", {})["World"] = {
+            str(row_id): row for row_id, row in world_rows.items()
+        }
+        write_base_data_cache(cache)
 
     CN_WORLD_NAME_CACHE = worlds
     return worlds
@@ -6525,6 +6862,7 @@ class TataruPlugin(Star):
         self.tarot_dict: dict | None = None
         self.cache_dir = PLUGIN_DIR / ".cache"
         self.calendar_task: asyncio.Task | None = None
+        self.base_data_cache_task: asyncio.Task | None = None
         self.risingstones_checkin_task: asyncio.Task | None = None
         self.risingstones_accounts = RisingstonesAccountStore(RISINGSTONES_DB_PATH)
         self.admin_store = PluginAdminStore(ADMIN_DB_PATH)
@@ -6535,6 +6873,7 @@ class TataruPlugin(Star):
         debug_log("plugin.initialize", version=PLUGIN_VERSION)
         self.tarot_dict = load_tarot()
         self.cache_dir.mkdir(exist_ok=True)
+        read_base_data_cache()
         self.risingstones_accounts.initialize()
         self.admin_store.initialize()
         saved_owner_curl = self.admin_store.get_setting("risingstones_owner_curl")
@@ -6546,6 +6885,7 @@ class TataruPlugin(Star):
                 str(self.config["risingstones_owner_curl"]).strip(),
             )
         self.calendar_task = asyncio.create_task(self.download_calendar_loop())
+        self.base_data_cache_task = asyncio.create_task(self.base_data_cache_loop())
         self.risingstones_checkin_task = asyncio.create_task(
             self.risingstones_checkin_loop()
         )
@@ -7422,6 +7762,25 @@ class TataruPlugin(Star):
             ]
         )
 
+    async def base_data_cache_loop(self):
+        while True:
+            try:
+                if base_data_cache_is_stale():
+                    await wait_for_base_data_refresh("startup_or_stale")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"基础数据缓存刷新失败: {exc}")
+
+            await asyncio.sleep(seconds_until_next_midnight())
+
+            try:
+                await wait_for_base_data_refresh("midnight")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"基础数据缓存定时刷新失败: {exc}")
+
     async def download_calendar_loop(self):
         while True:
             try:
@@ -7639,9 +7998,23 @@ class TataruPlugin(Star):
             return event.plain_result("暖暖获取失败，请看qq文档： " + QQ_DOC_URL)
 
     async def terminate(self):
+        global BASE_DATA_REFRESH_TASK
+
         if self.calendar_task:
             self.calendar_task.cancel()
+        refresh_tasks = set()
+        if self.base_data_cache_task:
+            self.base_data_cache_task.cancel()
+            refresh_tasks.add(self.base_data_cache_task)
+        active_refresh_task = BASE_DATA_REFRESH_TASK
+        if active_refresh_task:
+            active_refresh_task.cancel()
+            refresh_tasks.add(active_refresh_task)
         if self.risingstones_checkin_task:
             self.risingstones_checkin_task.cancel()
+        if refresh_tasks:
+            await asyncio.gather(*refresh_tasks, return_exceptions=True)
+        if BASE_DATA_REFRESH_TASK is active_refresh_task:
+            BASE_DATA_REFRESH_TASK = None
         debug_log("plugin.terminate")
         logger.info("Tataru AstrBot plugin terminated.")

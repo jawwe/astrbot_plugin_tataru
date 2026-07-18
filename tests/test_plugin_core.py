@@ -650,3 +650,376 @@ def test_admin_page_keeps_successful_writes_distinct_from_refresh_failures() -> 
     assert "async function refreshAfterWrite" in page_script
     assert "页面刷新失败" in page_script
     assert "await refreshAfterWrite(loadOverview, successMessage)" in page_script
+
+
+def test_base_data_cache_serves_name_sources(plugin_module, tmp_path, monkeypatch):
+    """Persistent base data cache feeds world, duty, map, and guide name lookups."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.CN_WORLD_NAME_CACHE = None
+    plugin_module.GARLAND_CORE_DATA = None
+    plugin_module.DUNGEON_NOTE_CACHE = None
+
+    plugin_module.write_base_data_cache(
+        {
+            "version": plugin_module.BASE_DATA_CACHE_VERSION,
+            "updated_at": "2026-07-17T00:00:00",
+            "worlds": {
+                "银泪湖": {
+                    "id": 1183,
+                    "data_centre": "猫小胖",
+                    "name": "银泪湖",
+                }
+            },
+            "xivapi_sheets": {
+                "ContentFinderCondition": {
+                    "1094": {
+                        "row_id": 1094,
+                        "fields": {
+                            "Name": "妖星乱舞绝境战",
+                            "ContentType": {"fields": {"Name": "绝境战"}},
+                        },
+                    }
+                }
+            },
+            "garland_core": {
+                "locationIndex": {"1": {"name": "拉诺西亚"}},
+                "jobs": [{"name": "刻木匠"}],
+            },
+            "dungeon_notes": {"100": {"测试副本": "test-duty"}},
+        }
+    )
+
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.CN_WORLD_NAME_CACHE = None
+    plugin_module.GARLAND_CORE_DATA = None
+    plugin_module.DUNGEON_NOTE_CACHE = None
+
+    async def fail_get(*_args, **_kwargs):
+        raise AssertionError("cache-backed lookups should not call network")
+
+    monkeypatch.setattr(plugin_module, "aiohttp_get", fail_get)
+
+    worlds = asyncio.run(plugin_module.load_cn_world_names())
+    rows = asyncio.run(
+        plugin_module.get_xivapi_sheet_rows(
+            "ContentFinderCondition",
+            {1094},
+            "Name,ContentType.Name",
+        )
+    )
+    duty_ids = asyncio.run(plugin_module.resolve_party_duty_ids("妖星"))
+    location_name = asyncio.run(
+        plugin_module.garland_core_value("locationIndex.1.name")
+    )
+    notes = asyncio.run(plugin_module.fetch_dungeon_notes())
+
+    assert worlds["银泪湖"]["id"] == 1183
+    assert plugin_module.xivapi_field_text(rows[1094], "Name") == "妖星乱舞绝境战"
+    assert duty_ids == [1094]
+    assert location_name == "拉诺西亚"
+    assert notes == {"100": {"测试副本": "test-duty"}}
+
+
+def test_missing_world_cache_fetches_and_persists(plugin_module, tmp_path, monkeypatch):
+    """When no name cache exists, the loader fetches fresh data and writes it."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.CN_WORLD_NAME_CACHE = None
+
+    async def fake_get(url, *_args, **_kwargs):
+        if "sheet/World" in url and "after=" not in url:
+            return {
+                "rows": [
+                    {
+                        "row_id": 1183,
+                        "fields": {
+                            "Name": "银泪湖",
+                            "DataCenter": {"fields": {"Name": "猫小胖"}},
+                        },
+                    }
+                ]
+            }
+        return {"rows": []}
+
+    monkeypatch.setattr(plugin_module, "aiohttp_get", fake_get)
+
+    worlds = asyncio.run(plugin_module.load_cn_world_names())
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.CN_WORLD_NAME_CACHE = None
+    cached = plugin_module.read_base_data_cache()
+
+    assert worlds["银泪湖"]["data_centre"] == "猫小胖"
+    assert cached["worlds"]["银泪湖"]["id"] == 1183
+
+
+def test_base_data_refresh_waits_until_next_midnight(plugin_module):
+    """The background refresh loop schedules the next refresh for local midnight."""
+    now = plugin_module.datetime(2026, 7, 17, 23, 59, 30)
+    assert plugin_module.seconds_until_next_midnight(now) == 30
+
+    noon = plugin_module.datetime(2026, 7, 17, 12, 0, 0)
+    assert plugin_module.seconds_until_next_midnight(noon) == 12 * 60 * 60
+
+
+def test_base_data_refresh_requests_share_one_task(plugin_module, monkeypatch):
+    """Scheduled and on-demand refreshes must reuse the active refresh task."""
+
+    async def exercise():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        reasons = []
+
+        async def fake_refresh(reason):
+            reasons.append(reason)
+            started.set()
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(plugin_module, "refresh_base_data_cache", fake_refresh)
+        plugin_module.BASE_DATA_REFRESH_TASK = None
+
+        scheduled_task = plugin_module.schedule_base_data_refresh("cache missing")
+        assert scheduled_task is not None
+        await started.wait()
+
+        waiting_task = asyncio.create_task(
+            plugin_module.wait_for_base_data_refresh("midnight")
+        )
+        await asyncio.sleep(0)
+
+        assert plugin_module.BASE_DATA_REFRESH_TASK is scheduled_task
+        release.set()
+        assert await scheduled_task is True
+        assert await waiting_task is True
+        await asyncio.sleep(0)
+
+        assert reasons == ["cache missing"]
+        assert plugin_module.BASE_DATA_REFRESH_TASK is None
+
+    asyncio.run(exercise())
+
+
+def test_plugin_terminate_cancels_and_waits_for_base_refresh(
+    plugin_module, monkeypatch
+):
+    """Plugin shutdown must not leave an on-demand cache refresh running."""
+
+    async def exercise():
+        started = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def pending_refresh():
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                finished.set()
+
+        refresh_task = asyncio.create_task(pending_refresh())
+        plugin_module.BASE_DATA_REFRESH_TASK = refresh_task
+        await started.wait()
+
+        plugin = object.__new__(plugin_module.TataruPlugin)
+        plugin.calendar_task = None
+        plugin.base_data_cache_task = None
+        plugin.risingstones_checkin_task = None
+
+        try:
+            await plugin.terminate()
+            assert refresh_task.cancelled()
+            assert finished.is_set()
+            assert plugin_module.BASE_DATA_REFRESH_TASK is None
+        finally:
+            if not refresh_task.done():
+                refresh_task.cancel()
+                await asyncio.gather(refresh_task, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+def test_partial_cache_write_does_not_mark_full_refresh_current(
+    plugin_module, tmp_path, monkeypatch
+):
+    """On-demand cache writes must not suppress the next complete refresh."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+
+    plugin_module.write_base_data_cache(
+        {
+            "version": plugin_module.BASE_DATA_CACHE_VERSION,
+            "updated_at": "2026-07-17T00:00:00",
+            "last_full_refresh_at": "",
+        }
+    )
+    cache = plugin_module.update_base_data_cache(
+        worlds={"银泪湖": {"id": 1183, "name": "银泪湖"}}
+    )
+
+    assert cache["last_full_refresh_at"] == ""
+    assert plugin_module.base_data_cache_is_stale(cache) is True
+
+
+def test_xivapi_full_sheet_fetch_rejects_incomplete_pagination(
+    plugin_module, monkeypatch
+):
+    """A malformed later page must not be returned as a complete sheet prefix."""
+
+    async def exercise():
+        calls = 0
+
+        async def fake_get(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {"rows": [{"row_id": 1000, "fields": {"Name": "第一页"}}]}
+            return None
+
+        monkeypatch.setattr(plugin_module, "safe_aiohttp_get", fake_get)
+
+        with pytest.raises(ValueError, match="pagination"):
+            await plugin_module.fetch_xivapi_sheet_all_rows("World", "Name")
+
+    asyncio.run(exercise())
+
+
+def test_xivapi_row_fetch_keeps_cached_hits_on_invalid_payload(
+    plugin_module, tmp_path, monkeypatch
+):
+    """An invalid response must not discard rows already found in the cache."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.write_base_data_cache(
+        {
+            "version": plugin_module.BASE_DATA_CACHE_VERSION,
+            "updated_at": "2026-07-17T00:00:00",
+            "last_full_refresh_at": "2026-07-17T00:00:00",
+            "xivapi_sheets": {
+                "ContentFinderCondition": {
+                    "1": {"row_id": 1, "fields": {"Name": "cached duty"}}
+                }
+            },
+        }
+    )
+
+    async def invalid_get(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        plugin_module, "schedule_base_data_refresh", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(plugin_module, "aiohttp_get", invalid_get)
+
+    rows = asyncio.run(
+        plugin_module.get_xivapi_sheet_rows("ContentFinderCondition", {1, 2}, "Name")
+    )
+
+    assert rows == {1: {"row_id": 1, "fields": {"Name": "cached duty"}}}
+
+
+def test_failed_full_refresh_preserves_previous_cache(
+    plugin_module, tmp_path, monkeypatch
+):
+    """A required source failure must leave persisted and in-memory data unchanged."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+    previous_refresh = "2026-07-16T00:00:00"
+    plugin_module.write_base_data_cache(
+        {
+            "version": plugin_module.BASE_DATA_CACHE_VERSION,
+            "updated_at": previous_refresh,
+            "last_full_refresh_at": previous_refresh,
+            "worlds": {"旧服": {"id": 1001, "data_centre": "猫小胖", "name": "旧服"}},
+            "xivapi_sheets": {
+                "ContentFinderCondition": {
+                    "1": {"row_id": 1, "fields": {"Name": "旧副本"}}
+                }
+            },
+            "garland_core": {"locationIndex": {"1": {"name": "旧地图"}}},
+            "dungeon_notes": {"100": {"旧攻略": "old-duty"}},
+        }
+    )
+
+    async def fake_sheet(sheet, _fields):
+        if sheet == "World":
+            return {
+                1002: {
+                    "row_id": 1002,
+                    "fields": {
+                        "Name": "新服",
+                        "DataCenter": {"fields": {"Name": "猫小胖"}},
+                    },
+                }
+            }
+        return {2: {"row_id": 2, "fields": {"Name": "新副本"}}}
+
+    async def failed_garland(*_args, **_kwargs):
+        return None
+
+    async def failed_notes():
+        raise ValueError("notes unavailable")
+
+    monkeypatch.setattr(plugin_module, "fetch_xivapi_sheet_all_rows", fake_sheet)
+    monkeypatch.setattr(plugin_module, "safe_aiohttp_get", failed_garland)
+    monkeypatch.setattr(plugin_module, "fetch_dungeon_notes_from_web", failed_notes)
+
+    refreshed = asyncio.run(plugin_module.refresh_base_data_cache("test"))
+    plugin_module.BASE_DATA_CACHE = None
+    cached = plugin_module.read_base_data_cache()
+
+    assert refreshed is False
+    assert cached["updated_at"] == previous_refresh
+    assert cached["last_full_refresh_at"] == previous_refresh
+    assert set(cached["worlds"]) == {"旧服"}
+    assert plugin_module.CN_WORLD_NAME_CACHE["旧服"]["id"] == 1001
+    assert plugin_module.GARLAND_CORE_DATA["locationIndex"]["1"]["name"] == "旧地图"
+    assert plugin_module.DUNGEON_NOTE_CACHE == {"100": {"旧攻略": "old-duty"}}
+
+
+def test_successful_full_refresh_updates_all_sources_and_timestamp(
+    plugin_module, tmp_path, monkeypatch
+):
+    """A complete refresh commits every source with a dedicated full timestamp."""
+    cache_path = tmp_path / "base_data_cache.json"
+    monkeypatch.setattr(plugin_module, "BASE_DATA_CACHE_PATH", cache_path)
+    plugin_module.BASE_DATA_CACHE = None
+    plugin_module.write_base_data_cache(plugin_module.empty_base_data_cache())
+
+    async def fake_sheet(sheet, _fields):
+        if sheet == "World":
+            return {
+                1183: {
+                    "row_id": 1183,
+                    "fields": {
+                        "Name": "银泪湖",
+                        "DataCenter": {"fields": {"Name": "猫小胖"}},
+                    },
+                }
+            }
+        return {1094: {"row_id": 1094, "fields": {"Name": "妖星乱舞"}}}
+
+    async def fake_garland(*_args, **_kwargs):
+        return {"locationIndex": {"1": {"name": "拉诺西亚"}}}
+
+    async def fake_notes():
+        return {"100": {"测试副本": "test-duty"}}
+
+    monkeypatch.setattr(plugin_module, "fetch_xivapi_sheet_all_rows", fake_sheet)
+    monkeypatch.setattr(plugin_module, "safe_aiohttp_get", fake_garland)
+    monkeypatch.setattr(plugin_module, "fetch_dungeon_notes_from_web", fake_notes)
+
+    assert asyncio.run(plugin_module.refresh_base_data_cache("test")) is True
+    plugin_module.BASE_DATA_CACHE = None
+    cached = plugin_module.read_base_data_cache()
+
+    assert cached["last_full_refresh_at"]
+    assert cached["updated_at"] == cached["last_full_refresh_at"]
+    assert cached["worlds"]["银泪湖"]["id"] == 1183
+    assert "1094" in cached["xivapi_sheets"]["ContentFinderCondition"]
+    assert cached["garland_core"]["locationIndex"]["1"]["name"] == "拉诺西亚"
+    assert cached["dungeon_notes"] == {"100": {"测试副本": "test-duty"}}
